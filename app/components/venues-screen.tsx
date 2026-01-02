@@ -27,7 +27,7 @@ import {
   SheetFooter,
 } from "@/components/ui/sheet"
 import { MapPin, Star, Euro, Search, Filter, Loader2, Clock, Phone, Mail, Calendar, SlidersHorizontal, X } from "lucide-react"
-import { useCollection, useCRUD } from "@/hooks/useFirestore"
+import { useCollection, useCRUD, useQuery } from "@/hooks/useFirestore"
 import { Arena, ArenaBooking, Venue } from "@/lib/types"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useToast } from "@/hooks/use-toast"
