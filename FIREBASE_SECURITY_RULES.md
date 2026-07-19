@@ -39,13 +39,33 @@ service cloud.firestore {
       return isAuthenticated() && getUserRole() == 'admin';
     }
     
+    // Fields other players' clients may touch when a match completes
+    // (stats write-back) — everything else on a user doc stays owner-only.
+    function onlyStatsFields() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['gamesPlayed', 'wins', 'losses', 'draws', 'mvps',
+                  'points', 'level', 'updatedAt']);
+    }
+    
+    // Fields any participant may touch on a match (join/leave/complete)
+    function onlyRosterOrResultFields() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['participants', 'participantNames', 'playersNeeded',
+                  'status', 'hasHappened', 'result', 'teams',
+                  'statsApplied', 'updatedAt']);
+    }
+    
     // Users collection
     match /users/{userId} {
       // Anyone authenticated can read user profiles
       allow read: if isAuthenticated();
       
-      // Users can only update their own profile
-      allow update: if isOwner(userId);
+      // Users can update their own profile; other authenticated users may
+      // only update stat counters (match-completion write-back).
+      // NOTE: for tamper-proof stats move this write-back into a Cloud
+      // Function and drop the onlyStatsFields() branch.
+      allow update: if isOwner(userId) ||
+        (isAuthenticated() && onlyStatsFields());
       
       // Users can create their own profile on signup
       allow create: if isOwner(userId);
@@ -62,9 +82,12 @@ service cloud.firestore {
       // Anyone authenticated can create a match
       allow create: if isAuthenticated();
       
-      // Match organizer or admin can update/delete
+      // Organizer/admin can update anything; other authenticated users may
+      // only touch roster and result fields (transactional join/leave and
+      // match completion from the app).
       allow update: if isAuthenticated() && 
-        (resource.data.organizerId == request.auth.uid || isAdmin());
+        (resource.data.organizerId == request.auth.uid || isAdmin() ||
+         onlyRosterOrResultFields());
       
       allow delete: if isAuthenticated() && 
         (resource.data.organizerId == request.auth.uid || isAdmin());
@@ -152,8 +175,9 @@ service cloud.firestore {
     match /matchHistory/{historyId} {
       allow read: if isAuthenticated();
       
-      allow create: if isAuthenticated() && 
-        request.resource.data.userId == request.auth.uid;
+      // Entries are written for every registered player when a match is
+      // completed, so the creator is not always the entry's owner.
+      allow create: if isAuthenticated();
       
       allow update, delete: if isAuthenticated() && 
         resource.data.userId == request.auth.uid;

@@ -15,6 +15,7 @@ import {
   Heart,
   BarChart3,
   Building2,
+  Home,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
@@ -46,22 +47,24 @@ export default function DashboardLayout({
     if (onNavigate) {
       onNavigate(id)
     } else {
-      // If no onNavigate provided, navigate to main app page
-      router.push("/app")
+      // Standalone pages (e.g. game detail) navigate back to the app,
+      // preserving the target screen via query param
+      router.push(id === "home" ? "/app" : `/app?screen=${id}`)
     }
     setSidebarOpen(false)
   }
 
   const menuItems = [
+    { id: "home", label: "Início", icon: Home },
     { id: "matchmaking", label: "MatchMaking", icon: Zap },
     { id: "rankings", label: "Rankings", icon: Trophy },
     { id: "venues", label: "Arenas", icon: MapPin },
-    { id: "bookings", label: "My Bookings", icon: Calendar },
-    { id: "history", label: "Match History", icon: History },
+    { id: "bookings", label: "As Minhas Reservas", icon: Calendar },
+    { id: "history", label: "Histórico de Jogos", icon: History },
     { id: "search", label: "Pesquisar Jogadores", icon: Search },
     { id: "friends", label: "Amigos", icon: Heart },
-    { id: "stats", label: "Minhas Estatísticas", icon: BarChart3 },
-    { id: "profile", label: "Profile", icon: User },
+    { id: "stats", label: "As Minhas Estatísticas", icon: BarChart3 },
+    { id: "profile", label: "Perfil", icon: User },
     // Organizer-only menu items
     ...(user?.role === "organizer"
       ? [{ id: "arenas", label: "Gerir Arenas", icon: Building2 }]
@@ -91,18 +94,16 @@ export default function DashboardLayout({
       <div className="p-4 border-b border-green-500">
         <div className="flex items-center gap-3">
           <Avatar>
-            <AvatarImage
-              src={user?.photoURL || "/placeholder.svg?height=40&width=40"}
-            />
-            <AvatarFallback>
+            {user?.photoURL ? <AvatarImage src={user.photoURL} /> : null}
+            <AvatarFallback className="text-green-700">
               {user?.firstName?.[0]}
               {user?.lastName?.[0]}
             </AvatarFallback>
           </Avatar>
           <div>
-            <p className="font-medium">{user?.displayName || "User"}</p>
+            <p className="font-medium">{user?.displayName || "Utilizador"}</p>
             <Badge variant="secondary" className="bg-green-500 text-white">
-              Level {user?.level || 1}
+              Nível {user?.level || 1}
             </Badge>
           </div>
         </div>
@@ -139,7 +140,7 @@ export default function DashboardLayout({
           className="w-full flex items-center gap-3 px-4 py-3 text-green-100 hover:bg-green-700 rounded-lg transition-colors"
         >
           <LogOut className="w-5 h-5" />
-          <span>Logout</span>
+          <span>Sair</span>
         </button>
       </div>
     </div>

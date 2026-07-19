@@ -29,8 +29,11 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useQuery, useCRUD, useCollection } from "@/hooks/useFirestore"
-import { Booking, Venue, Arena } from "@/lib/types"
+import { Booking, Venue, Arena, ArenaBooking, User } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
+import { findSlotConflict, minutesToTime } from "@/lib/firebase/bookingService"
+import { fetchDocument } from "@/lib/firebase/server"
+import { sendBookingOrganizerEmail, sendBookingUserEmail } from "@/lib/email/emailService"
 
 export default function BookingsScreen() {
   const { user } = useAuth()
@@ -41,6 +44,15 @@ export default function BookingsScreen() {
   const [newBooking, setNewBooking] = useState({
     sport: "",
     venue: "",
+    venueId: "",
+    date: "",
+    time: "",
+    duration: "60",
+    players: "2",
+  })
+  const [editDialogOpen, setEditDialogOpen] = useState(false)
+  const [editingBooking, setEditingBooking] = useState<Booking | null>(null)
+  const [editForm, setEditForm] = useState({
     date: "",
     time: "",
     duration: "60",
@@ -60,8 +72,18 @@ export default function BookingsScreen() {
   
   // Combine venues and arenas into a unified list for selection
   const allVenues = useMemo(() => {
-    const combined: { id: string; name: string; location: string; sports: string[] }[] = []
-    
+    const combined: {
+      id: string
+      name: string
+      location: string
+      sports: string[]
+      pricePerHour: number
+      type: "arena" | "venue"
+      organizerId?: string
+      organizerName?: string
+      organizerEmail?: string
+    }[] = []
+
     // Add legacy venues
     legacyVenues?.forEach((venue) => {
       combined.push({
@@ -69,9 +91,11 @@ export default function BookingsScreen() {
         name: venue.name,
         location: venue.location,
         sports: venue.sports || [],
+        pricePerHour: parseFloat(venue.pricePerHour) || 0,
+        type: "venue",
       })
     })
-    
+
     // Add new arenas (only active ones)
     arenas?.filter(a => a.isActive)?.forEach((arena) => {
       combined.push({
@@ -79,14 +103,20 @@ export default function BookingsScreen() {
         name: arena.name,
         location: arena.location,
         sports: arena.sports || [],
+        pricePerHour: arena.pricePerHour || 0,
+        type: "arena",
+        organizerId: arena.organizerId,
+        organizerName: arena.organizerName,
+        organizerEmail: arena.email,
       })
     })
-    
+
     return combined
   }, [legacyVenues, arenas])
 
   // CRUD operations
   const { create, update, loading: crudLoading } = useCRUD<Booking>("bookings")
+  const { create: createArenaBooking, update: updateArenaBooking } = useCRUD<ArenaBooking>("arenaBookings")
 
   // Calculate stats
   const stats = useMemo(() => {
@@ -151,7 +181,18 @@ export default function BookingsScreen() {
     if (!bookingToCancel) return
 
     try {
+      const booking = bookings?.find((b) => b.id === bookingToCancel)
       await update(bookingToCancel, { status: "cancelled" })
+
+      // Keep the organizer's dashboard in sync with the linked arena booking
+      if (booking?.arenaBookingId) {
+        try {
+          await updateArenaBooking(booking.arenaBookingId, { status: "cancelled" })
+        } catch (err) {
+          console.error("Error cancelling linked arena booking:", err)
+        }
+      }
+
       toast({
         title: "Reserva cancelada",
         description: "A tua reserva foi cancelada com sucesso.",
@@ -169,7 +210,7 @@ export default function BookingsScreen() {
   }
 
   const handleCreateBooking = async () => {
-    if (!user?.id || !newBooking.sport || !newBooking.venue || !newBooking.date || !newBooking.time) {
+    if (!user?.id || !newBooking.sport || !newBooking.venueId || !newBooking.date || !newBooking.time) {
       toast({
         title: "Erro",
         description: "Por favor preenche todos os campos.",
@@ -179,17 +220,109 @@ export default function BookingsScreen() {
     }
 
     try {
+      const selectedVenue = allVenues.find((v) => v.id === newBooking.venueId)
+      const durationMinutes = parseInt(newBooking.duration) || 60
+      const amount = ((selectedVenue?.pricePerHour || 0) * durationMinutes) / 60
+      const players = parseInt(newBooking.players) || 2
+      const priceStr = `€${amount.toFixed(2)}`
+      const userName = user.displayName || `${user.firstName} ${user.lastName}`
+
+      let arenaBookingId: string | undefined
+
+      if (selectedVenue?.type === "arena") {
+        // Block double-bookings on arenas: check the slot before creating
+        const conflict = await findSlotConflict(
+          selectedVenue.id,
+          newBooking.date,
+          newBooking.time,
+          durationMinutes
+        )
+        if (conflict) {
+          toast({
+            title: "Horário indisponível",
+            description: `Esse horário já está reservado (${conflict.time}–${conflict.endTime}). Escolhe outro horário.`,
+            variant: "destructive",
+          })
+          return
+        }
+
+        const [startH, startM] = newBooking.time.split(":").map(Number)
+        const endTime = minutesToTime((startH || 0) * 60 + (startM || 0) + durationMinutes)
+
+        // Create the linked arena booking so the organizer sees it too
+        const arenaBooking = await createArenaBooking({
+          arenaId: selectedVenue.id,
+          arenaName: selectedVenue.name,
+          userId: user.id,
+          userName,
+          userEmail: user.email || "",
+          userPhone: user.phone || "",
+          sport: newBooking.sport,
+          date: newBooking.date,
+          time: newBooking.time,
+          endTime,
+          duration: durationMinutes,
+          players,
+          status: "pending",
+          totalPrice: amount,
+          paymentStatus: "pending",
+          organizerId: selectedVenue.organizerId || "",
+        })
+        arenaBookingId = arenaBooking.id
+      }
+
       await create({
         userId: user.id,
         sport: newBooking.sport,
         venue: newBooking.venue,
+        venueId: newBooking.venueId,
         date: newBooking.date,
         time: newBooking.time,
         duration: `${newBooking.duration} min`,
-        players: parseInt(newBooking.players),
+        players,
         status: "pending",
-        price: "€15.00", // This should come from venue pricing
+        price: priceStr,
+        ...(selectedVenue ? { venueType: selectedVenue.type } : {}),
+        ...(arenaBookingId ? { arenaBookingId } : {}),
       })
+
+      // Email automations (fire-and-forget)
+      const emailInfo = {
+        venueName: newBooking.venue,
+        date: newBooking.date,
+        time: newBooking.time,
+        duration: `${durationMinutes} min`,
+        players,
+        price: priceStr,
+      }
+      sendBookingUserEmail(user.email, user.firstName, emailInfo, "pending")
+
+      if (selectedVenue?.type === "arena") {
+        if (selectedVenue.organizerEmail) {
+          sendBookingOrganizerEmail(
+            selectedVenue.organizerEmail,
+            selectedVenue.organizerName || "Organizador",
+            userName,
+            emailInfo
+          )
+        } else if (selectedVenue.organizerId) {
+          fetchDocument("users", selectedVenue.organizerId)
+            .then((docData) => {
+              const organizer = docData as User | null
+              if (organizer?.email) {
+                sendBookingOrganizerEmail(
+                  organizer.email,
+                  selectedVenue.organizerName || organizer.firstName || "Organizador",
+                  userName,
+                  emailInfo
+                )
+              }
+            })
+            .catch(() => {
+              // Email is a courtesy — never block the booking flow
+            })
+        }
+      }
 
       toast({
         title: "Reserva criada",
@@ -200,6 +333,7 @@ export default function BookingsScreen() {
       setNewBooking({
         sport: "",
         venue: "",
+        venueId: "",
         date: "",
         time: "",
         duration: "60",
@@ -209,6 +343,107 @@ export default function BookingsScreen() {
       toast({
         title: "Erro",
         description: "Não foi possível criar a reserva.",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const openEditDialog = (booking: Booking) => {
+    if (booking.status !== "pending" && booking.status !== "confirmed") return
+    setEditingBooking(booking)
+    setEditForm({
+      date: booking.date,
+      time: booking.time,
+      duration: String(parseInt(booking.duration) || 60),
+      players: String(booking.players || 2),
+    })
+    setEditDialogOpen(true)
+  }
+
+  const handleEditBooking = async () => {
+    if (!editingBooking) return
+
+    if (!editForm.date || !editForm.time) {
+      toast({
+        title: "Erro",
+        description: "Por favor preenche todos os campos.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      const newDuration = parseInt(editForm.duration) || 60
+      const venueInfo =
+        allVenues.find((v) => v.id === editingBooking.venueId) ||
+        allVenues.find((v) => v.name === editingBooking.venue)
+
+      // For arena bookings, verify the new slot is free (own booking doesn't block)
+      if (editingBooking.arenaBookingId && editingBooking.venueId) {
+        const conflict = await findSlotConflict(
+          editingBooking.venueId,
+          editForm.date,
+          editForm.time,
+          newDuration
+        )
+        if (conflict && conflict.id !== editingBooking.arenaBookingId) {
+          toast({
+            title: "Horário indisponível",
+            description: `Esse horário já está reservado (${conflict.time}–${conflict.endTime}). Escolhe outro horário.`,
+            variant: "destructive",
+          })
+          return
+        }
+      }
+
+      const updates: Partial<Booking> = {
+        date: editForm.date,
+        time: editForm.time,
+        duration: `${editForm.duration} min`,
+        players: parseInt(editForm.players) || 1,
+      }
+
+      // Recompute the price if the duration changed and we know the venue's rate
+      const previousDuration = parseInt(editingBooking.duration) || 60
+      if (newDuration !== previousDuration && venueInfo) {
+        const amount = (venueInfo.pricePerHour * newDuration) / 60
+        updates.price = `€${amount.toFixed(2)}`
+      }
+
+      await update(editingBooking.id, updates)
+
+      // Keep the linked arena booking in sync for the organizer
+      if (editingBooking.arenaBookingId) {
+        const [startH, startM] = editForm.time.split(":").map(Number)
+        const endTime = minutesToTime((startH || 0) * 60 + (startM || 0) + newDuration)
+        const arenaUpdates: Partial<ArenaBooking> = {
+          date: editForm.date,
+          time: editForm.time,
+          endTime,
+          duration: newDuration,
+          players: parseInt(editForm.players) || 1,
+        }
+        if (venueInfo) {
+          arenaUpdates.totalPrice = (venueInfo.pricePerHour * newDuration) / 60
+        }
+        try {
+          await updateArenaBooking(editingBooking.arenaBookingId, arenaUpdates)
+        } catch (err) {
+          console.error("Error updating linked arena booking:", err)
+        }
+      }
+
+      toast({
+        title: "Reserva atualizada",
+        description: "A tua reserva foi atualizada com sucesso.",
+      })
+
+      setEditDialogOpen(false)
+      setEditingBooking(null)
+    } catch {
+      toast({
+        title: "Erro",
+        description: "Não foi possível atualizar a reserva.",
         variant: "destructive",
       })
     }
@@ -307,15 +542,18 @@ export default function BookingsScreen() {
                 <div className="space-y-2">
                   <Label>Local</Label>
                   <Select
-                    value={newBooking.venue}
-                    onValueChange={(v) => setNewBooking({ ...newBooking, venue: v })}
+                    value={newBooking.venueId}
+                    onValueChange={(id) => {
+                      const selected = allVenues.find((v) => v.id === id)
+                      setNewBooking({ ...newBooking, venueId: id, venue: selected?.name || "" })
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Seleciona um local" />
                     </SelectTrigger>
                     <SelectContent>
                       {allVenues?.map((venue) => (
-                        <SelectItem key={venue.id} value={venue.name}>
+                        <SelectItem key={venue.id} value={venue.id}>
                           {venue.name}
                         </SelectItem>
                       ))}
@@ -440,7 +678,7 @@ export default function BookingsScreen() {
                   <span className="text-sm text-gray-600">{booking.players} jogadores</span>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm">
+                  <Button variant="outline" size="sm" onClick={() => openEditDialog(booking)}>
                     <Edit className="w-4 h-4 mr-1" />
                     Editar
                   </Button>
@@ -462,6 +700,85 @@ export default function BookingsScreen() {
           </Card>
         ))}
       </div>
+
+      {/* Edit Booking Dialog */}
+      <Dialog
+        open={editDialogOpen}
+        onOpenChange={(open) => {
+          setEditDialogOpen(open)
+          if (!open) setEditingBooking(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Editar Reserva</DialogTitle>
+            <DialogDescription>
+              {editingBooking ? `${editingBooking.sport} em ${editingBooking.venue}` : "Altera os detalhes da tua reserva"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Data</Label>
+                <Input
+                  type="date"
+                  value={editForm.date}
+                  onChange={(e) => setEditForm({ ...editForm, date: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Hora</Label>
+                <Input
+                  type="time"
+                  value={editForm.time}
+                  onChange={(e) => setEditForm({ ...editForm, time: e.target.value })}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Duração (min)</Label>
+                <Select
+                  value={editForm.duration}
+                  onValueChange={(v) => setEditForm({ ...editForm, duration: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="30">30 min</SelectItem>
+                    <SelectItem value="60">60 min</SelectItem>
+                    <SelectItem value="90">90 min</SelectItem>
+                    <SelectItem value="120">120 min</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Jogadores</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="22"
+                  value={editForm.players}
+                  onChange={(e) => setEditForm({ ...editForm, players: e.target.value })}
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              Cancelar
+            </Button>
+            <Button
+              className="bg-green-600 hover:bg-green-700"
+              onClick={handleEditBooking}
+              disabled={crudLoading}
+            >
+              {crudLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Guardar Alterações"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Cancel Confirmation Dialog */}
       <AlertDialog open={cancelDialogOpen} onOpenChange={setCancelDialogOpen}>

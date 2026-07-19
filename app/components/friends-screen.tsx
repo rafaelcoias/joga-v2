@@ -1,17 +1,20 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect, useRef } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Input } from "@/components/ui/input"
-import { MessageCircle, Calendar, Search, UserMinus, UserCheck, UserX, Loader2, Users } from "lucide-react"
+import { Search, UserMinus, UserCheck, UserX, Loader2, Users } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useQuery, useCRUD } from "@/hooks/useFirestore"
-import { FriendRequest } from "@/lib/types"
+import { fetchDocument } from "@/lib/firebase/server"
+import { FriendRequest, User } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
+import { sendFriendAcceptedEmail } from "@/lib/email/emailService"
+import { formatDate } from "@/lib/utils"
 
 // Helper type for displaying friends
 interface FriendDisplay {
@@ -23,11 +26,20 @@ interface FriendDisplay {
   createdAt: unknown;
 }
 
+// Cached profile info for a friend (photo + online status)
+interface FriendProfile {
+  photoURL?: string;
+  status?: User["status"];
+  showStatus: boolean;
+}
+
 export default function FriendsScreen() {
   const { user } = useAuth()
   const { toast } = useToast()
   const [searchTerm, setSearchTerm] = useState("")
   const [processingId, setProcessingId] = useState<string | null>(null)
+  const [friendProfiles, setFriendProfiles] = useState<Record<string, FriendProfile>>({})
+  const fetchedProfileIds = useRef<Set<string>>(new Set())
 
   // Fetch sent friend requests (where user is sender)
   const { data: sentRequests, loading: sentLoading } = useQuery<FriendRequest>(
@@ -67,7 +79,7 @@ export default function FriendsScreen() {
         friendId: r.receiverId,
         friendName: r.receiverName,
         friendPhoto: undefined, // We don't have receiver photo in request
-        acceptedAt: r.createdAt,
+        acceptedAt: (r as FriendRequest & { acceptedAt?: unknown }).acceptedAt ?? r.createdAt,
         createdAt: r.createdAt,
       })
     })
@@ -79,13 +91,55 @@ export default function FriendsScreen() {
         friendId: r.senderId,
         friendName: r.senderName,
         friendPhoto: r.senderPhoto,
-        acceptedAt: r.createdAt,
+        acceptedAt: (r as FriendRequest & { acceptedAt?: unknown }).acceptedAt ?? r.createdAt,
         createdAt: r.createdAt,
       })
     })
 
     return friends
   }, [sentRequests, receivedRequests])
+
+  // Stable key of friend ids so the profile fetch only runs when the list changes
+  const friendIdsKey = useMemo(
+    () => Array.from(new Set(acceptedFriends.map(f => f.friendId))).sort().join(","),
+    [acceptedFriends]
+  )
+
+  // Fetch each friend's user document once to get real photo and online status
+  useEffect(() => {
+    const ids = friendIdsKey ? friendIdsKey.split(",") : []
+    const missing = ids.filter(id => !fetchedProfileIds.current.has(id))
+    if (missing.length === 0) return
+
+    missing.forEach(id => fetchedProfileIds.current.add(id))
+    let cancelled = false
+
+    Promise.all(
+      missing.map(async (id) => {
+        const doc = (await fetchDocument("users", id)) as User | null
+        return [id, doc] as const
+      })
+    ).then((results) => {
+      if (cancelled) return
+      setFriendProfiles(prev => {
+        const next = { ...prev }
+        results.forEach(([id, doc]) => {
+          if (doc) {
+            next[id] = {
+              photoURL: doc.photoURL,
+              status: doc.status,
+              showStatus: doc.privacy?.onlineStatus !== false,
+            }
+          }
+        })
+        return next
+      })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [friendIdsKey])
 
   // Filter friends by search term
   const filteredFriends = useMemo(() => {
@@ -98,8 +152,26 @@ export default function FriendsScreen() {
   const handleAcceptRequest = async (request: FriendRequest) => {
     setProcessingId(request.id)
     try {
-      // Update the request status to accepted
-      await updateRequest(request.id, { status: "accepted" })
+      // Update the request status to accepted and record when
+      const updates: Partial<FriendRequest> & { acceptedAt: Date } = {
+        status: "accepted",
+        acceptedAt: new Date(),
+      }
+      await updateRequest(request.id, updates)
+
+      // Notify the original sender by email (fire-and-forget, never blocks the flow)
+      fetchDocument("users", request.senderId)
+        .then((doc) => {
+          const sender = doc as User | null
+          sendFriendAcceptedEmail(
+            sender?.email,
+            sender?.firstName || request.senderName,
+            user?.displayName || ""
+          )
+        })
+        .catch((err) => {
+          console.warn("Failed to send friend-accepted email:", err)
+        })
 
       toast({
         title: "Pedido aceite",
@@ -244,14 +316,16 @@ export default function FriendsScreen() {
 
           {/* Friends List */}
           <div className="space-y-4">
-            {filteredFriends.map((friend) => (
+            {filteredFriends.map((friend) => {
+              const profile = friendProfiles[friend.friendId]
+              return (
               <Card key={friend.id} className="hover:shadow-lg transition-shadow">
                 <CardContent className="p-4">
                   <div className="flex justify-between items-center">
                     <div className="flex items-center gap-4">
                       <div className="relative">
                         <Avatar className="w-12 h-12">
-                          <AvatarImage src={friend.friendPhoto} />
+                          <AvatarImage src={profile?.photoURL || friend.friendPhoto} />
                           <AvatarFallback>
                             {friend.friendName
                               .split(" ")
@@ -259,30 +333,22 @@ export default function FriendsScreen() {
                               .join("")}
                           </AvatarFallback>
                         </Avatar>
-                        <div
-                          className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${getStatusColor("offline")}`}
-                        />
+                        {profile?.showStatus && (
+                          <div
+                            className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${getStatusColor(profile.status || "offline")}`}
+                          />
+                        )}
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
                           <h3 className="font-medium">{friend.friendName}</h3>
                         </div>
                         <p className="text-sm text-gray-600">
-                          Amigos desde {friend.acceptedAt
-                            ? new Date(friend.acceptedAt as unknown as string).toLocaleDateString("pt-PT")
-                            : new Date(friend.createdAt as unknown as string).toLocaleDateString("pt-PT")}
+                          Amigos desde {formatDate(friend.acceptedAt ?? friend.createdAt)}
                         </p>
                       </div>
                     </div>
                     <div className="flex gap-2">
-                      <Button variant="outline" size="sm">
-                        <MessageCircle className="w-4 h-4 mr-1" />
-                        Mensagem
-                      </Button>
-                      <Button variant="outline" size="sm">
-                        <Calendar className="w-4 h-4 mr-1" />
-                        Convidar
-                      </Button>
                       <Button
                         variant="outline"
                         size="sm"
@@ -300,7 +366,8 @@ export default function FriendsScreen() {
                   </div>
                 </CardContent>
               </Card>
-            ))}
+              )
+            })}
           </div>
         </TabsContent>
 
@@ -343,7 +410,7 @@ export default function FriendsScreen() {
                           </Badge>
                         </div>
                         <p className="text-sm text-gray-600">
-                          Pedido recebido {new Date(request.createdAt as unknown as string).toLocaleDateString("pt-PT")}
+                          Pedido recebido {formatDate(request.createdAt)}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
                           {request.mutualFriends > 0 && (
@@ -420,7 +487,6 @@ export default function FriendsScreen() {
                   <div className="flex justify-between items-center">
                     <div className="flex items-center gap-4">
                       <Avatar className="w-12 h-12">
-                        <AvatarImage src="/placeholder.svg" />
                         <AvatarFallback>
                           {request.receiverName
                             .split(" ")
@@ -433,7 +499,7 @@ export default function FriendsScreen() {
                           <h3 className="font-medium">{request.receiverName}</h3>
                         </div>
                         <p className="text-sm text-gray-600">
-                          Pedido enviado {new Date(request.createdAt as unknown as string).toLocaleDateString("pt-PT")}
+                          Pedido enviado {formatDate(request.createdAt)}
                         </p>
                         {request.favoriteSports && request.favoriteSports.length > 0 && (
                           <div className="flex gap-1 mt-1">

@@ -1,12 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   collection,
   query,
   where,
-  orderBy,
-  limit,
+  getDocs,
   onSnapshot,
   QueryConstraint,
   WhereFilterOp,
@@ -44,13 +43,21 @@ export function useCollection<T>(
 
   const { constraints = [], realtime = false } = options;
 
+  // QueryConstraint objects are rebuilt on every render, so they cannot go in
+  // dependency arrays without causing refetch loops. The ref keeps `refresh`
+  // reading the latest constraints; the initial subscription uses the mount-time
+  // value (all current callers pass static constraints).
+  const constraintsRef = useRef(constraints);
+  constraintsRef.current = constraints;
+
   useEffect(() => {
     setLoading(true);
+    const activeConstraints = constraintsRef.current;
 
     if (realtime) {
       // Real-time listener
       const colRef = collection(db, collectionName);
-      const q = constraints.length > 0 ? query(colRef, ...constraints) : colRef;
+      const q = activeConstraints.length > 0 ? query(colRef, ...activeConstraints) : colRef;
 
       const unsubscribe = onSnapshot(
         q,
@@ -75,7 +82,7 @@ export function useCollection<T>(
       // One-time fetch
       const loadData = async () => {
         try {
-          const docs = await fetchDocuments(collectionName, constraints);
+          const docs = await fetchDocuments(collectionName, activeConstraints);
           setData(docs as T[]);
           setError(null);
         } catch (err) {
@@ -93,7 +100,7 @@ export function useCollection<T>(
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const docs = await fetchDocuments(collectionName, constraints);
+      const docs = await fetchDocuments(collectionName, constraintsRef.current);
       setData(docs as T[]);
       setError(null);
     } catch (err) {
@@ -165,19 +172,26 @@ export function useQuery<T>(
 
   const { enabled = true, realtime = false } = options;
 
+  // Stable key so changing filter values triggers a refetch without putting a
+  // fresh array reference in the dependency list every render.
+  const filtersKey = JSON.stringify(filters);
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
   useEffect(() => {
-    if (!enabled || filters.length === 0) {
+    if (!enabled) {
       setData([]);
       setLoading(false);
       return;
     }
 
+    const activeFilters = filtersRef.current;
     setLoading(true);
 
     if (realtime) {
       const colRef = collection(db, collectionName);
-      const constraints = filters.map((f) => where(f.field, f.operator, f.value));
-      const q = query(colRef, ...constraints);
+      const constraints = activeFilters.map((f) => where(f.field, f.operator, f.value));
+      const q = constraints.length > 0 ? query(colRef, ...constraints) : query(colRef);
 
       const unsubscribe = onSnapshot(
         q,
@@ -201,25 +215,22 @@ export function useQuery<T>(
     } else {
       const loadData = async () => {
         try {
-          // Use the first filter for simple queries
-          if (filters.length === 1) {
+          if (activeFilters.length === 1) {
+            // Use the shared helper for simple queries
             const docs = await getDocWithQuery(
               collectionName,
-              filters[0].field,
-              filters[0].operator,
-              filters[0].value
+              activeFilters[0].field,
+              activeFilters[0].operator,
+              activeFilters[0].value
             );
             setData(docs as T[]);
           } else {
-            // For multiple filters, build constraints
             const colRef = collection(db, collectionName);
-            const constraints = filters.map((f) =>
+            const constraints = activeFilters.map((f) =>
               where(f.field, f.operator, f.value)
             );
-            const q = query(colRef, ...constraints);
-            const snapshot = await import("firebase/firestore").then((m) =>
-              m.getDocs(q)
-            );
+            const q = constraints.length > 0 ? query(colRef, ...constraints) : query(colRef);
+            const snapshot = await getDocs(q);
             const docs = snapshot.docs.map((doc) => ({
               id: doc.id,
               ...doc.data(),
@@ -237,7 +248,8 @@ export function useQuery<T>(
 
       loadData();
     }
-  }, [collectionName, enabled, realtime, JSON.stringify(filters)]);
+    // filtersKey stands in for the filters array (stable across renders)
+  }, [collectionName, enabled, realtime, filtersKey]);
 
   return { data, loading, error };
 }

@@ -5,86 +5,224 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
-import { Trophy, Target, Clock, Award, Zap, Loader2, BarChart3 } from "lucide-react"
+import { Trophy, Target, Clock, Award, Zap, Loader2, BarChart3, Crown } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
-import { useDocument, useQuery } from "@/hooks/useFirestore"
-import { UserStats, MonthlyProgress, Achievement } from "@/lib/types"
+import { useQuery } from "@/hooks/useFirestore"
+import { MatchHistory } from "@/lib/types"
+import { toDate } from "@/lib/utils"
+
+const MONTH_LABELS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
+
+const SPORT_EMOJI: Record<string, string> = {
+  futebol: "⚽",
+  futsal: "⚽",
+  "ténis": "🎾",
+  tenis: "🎾",
+  basquetebol: "🏀",
+  padel: "🏓",
+  voleibol: "🏐",
+}
+
+interface SportBreakdown {
+  games: number
+  wins: number
+  losses: number
+  draws: number
+  winRate: number
+  hours: number
+  goals: number
+  assists: number
+  points: number
+  aces: number
+}
+
+interface MonthBucket {
+  key: string
+  label: string
+  games: number
+  wins: number
+}
+
+interface ComputedAchievement {
+  id: string
+  icon: string
+  name: string
+  description: string
+  progress: number
+  maxProgress: number
+  completed: boolean
+}
+
+function parseDurationHours(duration: string | undefined): number {
+  const match = duration?.match(/(\d+)\s*min/)
+  const minutes = match ? parseInt(match[1], 10) : 60
+  return minutes / 60
+}
+
+function matchDate(match: MatchHistory): Date | null {
+  return toDate(match.createdAt) ?? (match.date ? toDate(match.date) : null)
+}
 
 export default function StatsScreen() {
   const { user } = useAuth()
 
-  // Fetch user stats
-  const { data: userStats, loading: statsLoading } = useDocument<UserStats>(
-    "userStats",
-    user?.id || null
-  )
-
-  // Fetch monthly progress
-  const { data: monthlyProgress, loading: progressLoading } = useQuery<MonthlyProgress>(
-    "monthlyProgress",
+  // Live match history (one doc per completed match per player)
+  const { data: matches, loading: matchesLoading } = useQuery<MatchHistory>(
+    "matchHistory",
     [{ field: "userId", operator: "==", value: user?.id || "" }],
-    { enabled: !!user?.id }
+    { enabled: !!user?.id, realtime: true }
   )
 
-  // Fetch achievements
-  const { data: achievements, loading: achievementsLoading } = useQuery<Achievement>(
-    "achievements",
-    [{ field: "userId", operator: "==", value: user?.id || "" }],
-    { enabled: !!user?.id }
-  )
+  // Overall stats: user doc first (kept live by match completion), hours from matchHistory
+  const overallStats = useMemo(() => {
+    const totalGames = user?.gamesPlayed || 0
+    const wins = user?.wins || 0
+    const totalHours = matches.reduce((sum, m) => sum + parseDurationHours(m.duration), 0)
 
-  // Default stats when no data
-  const overallStats = useMemo(() => ({
-    totalGames: userStats?.totalGames || user?.gamesPlayed || 0,
-    wins: userStats?.wins || user?.wins || 0,
-    losses: userStats?.losses || user?.losses || 0,
-    draws: userStats?.draws || user?.draws || 0,
-    winRate: userStats?.winRate || 0,
-    totalHours: userStats?.totalHours || 0,
-    currentStreak: userStats?.currentStreak || 0,
-    bestStreak: userStats?.bestStreak || 0,
-    level: userStats?.level || user?.level || 1,
-    totalPoints: userStats?.totalPoints || user?.points || 0,
-  }), [userStats, user])
+    // Streaks derived from match history in chronological order
+    const chronological = [...matches].sort((a, b) => {
+      const da = matchDate(a)?.getTime() ?? 0
+      const db = matchDate(b)?.getTime() ?? 0
+      return da - db
+    })
+    let bestStreak = 0
+    let run = 0
+    for (const m of chronological) {
+      if (m.result === "win") {
+        run++
+        if (run > bestStreak) bestStreak = run
+      } else {
+        run = 0
+      }
+    }
+    let currentStreak = 0
+    for (let i = chronological.length - 1; i >= 0; i--) {
+      if (chronological[i].result === "win") currentStreak++
+      else break
+    }
 
-  // Sport stats from userStats
+    return {
+      totalGames,
+      wins,
+      losses: user?.losses || 0,
+      draws: user?.draws || 0,
+      winRate: totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0,
+      totalHours: Math.round(totalHours * 10) / 10,
+      currentStreak,
+      bestStreak,
+      level: user?.level || 1,
+      totalPoints: user?.points || 0,
+    }
+  }, [user, matches])
+
+  // Sport breakdown derived from match history
   const sportStats = useMemo(() => {
-    if (!userStats?.sportStats) return {}
-    return userStats.sportStats
-  }, [userStats])
+    const bySport: Record<string, SportBreakdown> = {}
+    for (const m of matches) {
+      const sport = (m.sport || "outro").toLowerCase()
+      if (!bySport[sport]) {
+        bySport[sport] = { games: 0, wins: 0, losses: 0, draws: 0, winRate: 0, hours: 0, goals: 0, assists: 0, points: 0, aces: 0 }
+      }
+      const s = bySport[sport]
+      s.games++
+      if (m.result === "win") s.wins++
+      else if (m.result === "loss") s.losses++
+      else s.draws++
+      s.hours += parseDurationHours(m.duration)
+      s.goals += m.myStats?.goals || 0
+      s.assists += m.myStats?.assists || 0
+      s.points += m.myStats?.points || 0
+      s.aces += m.myStats?.aces || 0
+    }
+    for (const s of Object.values(bySport)) {
+      s.winRate = s.games > 0 ? Math.round((s.wins / s.games) * 100) : 0
+      s.hours = Math.round(s.hours * 10) / 10
+    }
+    return bySport
+  }, [matches])
 
-  // Sort monthly progress by date
-  const sortedProgress = useMemo(() => {
-    if (!monthlyProgress) return []
-    return [...monthlyProgress].sort((a, b) => {
-      const dateA = new Date(`${a.year}-${a.month}-01`)
-      const dateB = new Date(`${b.year}-${b.month}-01`)
-      return dateA.getTime() - dateB.getTime()
-    }).slice(-6) // Last 6 months
-  }, [monthlyProgress])
+  // Monthly progress: last 6 months bucketed from match history (current month always shown)
+  const monthlyProgress = useMemo<MonthBucket[]>(() => {
+    const now = new Date()
+    const buckets: MonthBucket[] = []
+    const index = new Map<string, MonthBucket>()
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const key = `${d.getFullYear()}-${d.getMonth()}`
+      const bucket: MonthBucket = { key, label: MONTH_LABELS[d.getMonth()], games: 0, wins: 0 }
+      buckets.push(bucket)
+      index.set(key, bucket)
+    }
+    for (const m of matches) {
+      const d = matchDate(m)
+      if (!d) continue
+      const bucket = index.get(`${d.getFullYear()}-${d.getMonth()}`)
+      if (!bucket) continue
+      bucket.games++
+      if (m.result === "win") bucket.wins++
+    }
+    return buckets
+  }, [matches])
 
-  // Calculate chart values
   const maxGames = useMemo(() => {
-    if (sortedProgress.length === 0) return 10
-    return Math.max(...sortedProgress.map((m) => m.games), 1)
-  }, [sortedProgress])
+    return Math.max(...monthlyProgress.map((m) => m.games), 1)
+  }, [monthlyProgress])
 
   const chartHeight = 200
 
-  // Calculate progress to next level (mock calculation)
+  // Achievements computed from live user data
+  const achievements = useMemo<ComputedAchievement[]>(() => {
+    const gamesPlayed = user?.gamesPlayed || 0
+    const wins = user?.wins || 0
+    const mvps = user?.mvps || 0
+    const level = user?.level || 1
+    const points = user?.points || 0
+
+    const build = (
+      id: string,
+      icon: string,
+      name: string,
+      description: string,
+      value: number,
+      target: number
+    ): ComputedAchievement => ({
+      id,
+      icon,
+      name,
+      description,
+      progress: Math.min(value, target),
+      maxProgress: target,
+      completed: value >= target,
+    })
+
+    return [
+      build("first-game", "🎮", "Primeiro Jogo", "Joga a tua primeira partida", gamesPlayed, 1),
+      build("first-win", "🏆", "Primeira Vitória", "Ganha a tua primeira partida", wins, 1),
+      build("hat-trick", "🔥", "Hat-trick de Vitórias", "Ganha 3 partidas", wins, 3),
+      build("veteran", "🎖️", "Veterano", "Joga 10 partidas", gamesPlayed, 10),
+      build("marathon", "🏃", "Maratonista", "Joga 25 partidas", gamesPlayed, 25),
+      build("mvp", "👑", "MVP", "Sê eleito MVP de uma partida", mvps, 1),
+      build("team-star", "⭐", "Estrela da Equipa", "Sê eleito MVP 5 vezes", mvps, 5),
+      build("level-5", "📈", "Nível 5", "Alcança o nível 5", level, 5),
+      build("legend", "🐐", "Lenda", "Alcança o nível 10", level, 10),
+      build("point-collector", "💎", "Colecionador de Pontos", "Acumula 500 pontos", points, 500),
+    ]
+  }, [user])
+
+  // Progress to next level
   const progressToNextLevel = useMemo(() => {
     const pointsPerLevel = 300
     const currentLevelPoints = (overallStats.level - 1) * pointsPerLevel
     const nextLevelPoints = overallStats.level * pointsPerLevel
     const pointsInCurrentLevel = overallStats.totalPoints - currentLevelPoints
-    const pointsNeeded = nextLevelPoints - overallStats.totalPoints
+    const pointsNeeded = Math.max(0, nextLevelPoints - overallStats.totalPoints)
     const progress = Math.min(100, Math.round((pointsInCurrentLevel / pointsPerLevel) * 100))
     return { progress, pointsNeeded }
   }, [overallStats])
 
-  const loading = statsLoading || progressLoading || achievementsLoading
+  const hasGames = matches.length > 0
 
-  if (loading) {
+  if (matchesLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center">
@@ -112,7 +250,7 @@ export default function StatsScreen() {
 
         <TabsContent value="overview" className="space-y-6">
           {/* Main Stats Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-sm font-medium">Total de Jogos</CardTitle>
@@ -134,7 +272,7 @@ export default function StatsScreen() {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold text-green-600">
-                  {overallStats.winRate.toFixed(0)}%
+                  {overallStats.winRate}%
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {overallStats.wins} vitórias
@@ -150,8 +288,8 @@ export default function StatsScreen() {
               <CardContent>
                 <div className="text-2xl font-bold text-blue-600">{overallStats.totalHours}h</div>
                 <p className="text-xs text-muted-foreground">
-                  Média: {overallStats.totalGames > 0
-                    ? (overallStats.totalHours / overallStats.totalGames).toFixed(1)
+                  Média: {matches.length > 0
+                    ? (overallStats.totalHours / matches.length).toFixed(1)
                     : 0}h/jogo
                 </p>
               </CardContent>
@@ -166,6 +304,19 @@ export default function StatsScreen() {
                 <div className="text-2xl font-bold text-orange-600">{overallStats.currentStreak}</div>
                 <p className="text-xs text-muted-foreground">
                   Melhor: {overallStats.bestStreak} vitórias
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">MVPs</CardTitle>
+                <Crown className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold text-yellow-600">{user?.mvps || 0}</div>
+                <p className="text-xs text-muted-foreground">
+                  Vezes eleito MVP
                 </p>
               </CardContent>
             </Card>
@@ -203,7 +354,7 @@ export default function StatsScreen() {
                   Sem estatísticas por desporto
                 </h3>
                 <p className="text-gray-600">
-                  Joga partidas para começares a ver as tuas estatísticas por desporto!
+                  Ainda não tens jogos. Joga partidas para começares a ver as tuas estatísticas por desporto!
                 </p>
               </CardContent>
             </Card>
@@ -213,11 +364,7 @@ export default function StatsScreen() {
                 <Card key={sport}>
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">
-                      {sport === "futebol" || sport === "futsal" ? "⚽" :
-                       sport === "ténis" || sport === "tenis" ? "🎾" :
-                       sport === "basquetebol" ? "🏀" :
-                       sport === "padel" ? "🏓" :
-                       sport === "voleibol" ? "🏐" : "🏆"}
+                      {SPORT_EMOJI[sport] || "🏆"}
                       {sport.charAt(0).toUpperCase() + sport.slice(1)}
                       <Badge variant="outline">{stats.games} jogos</Badge>
                     </CardTitle>
@@ -227,40 +374,36 @@ export default function StatsScreen() {
                       <div>
                         <p className="text-sm text-gray-600">Taxa de Vitórias</p>
                         <p className="text-2xl font-bold text-green-600">
-                          {stats.winRate?.toFixed(0) || 0}%
+                          {stats.winRate}%
                         </p>
                       </div>
                       <div>
                         <p className="text-sm text-gray-600">
-                          {stats.goals !== undefined ? "Golos" : "Pontos"}
+                          {stats.goals > 0 || stats.points === 0 ? "Golos" : "Pontos"}
                         </p>
                         <p className="text-2xl font-bold text-blue-600">
-                          {stats.goals || stats.points || 0}
+                          {stats.goals > 0 || stats.points === 0 ? stats.goals : stats.points}
                         </p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <p className="text-sm text-gray-600">
-                          {stats.assists !== undefined ? "Assistências" :
-                           stats.aces !== undefined ? "Aces" :
-                           stats.winners !== undefined ? "Winners" : "Outros"}
-                        </p>
+                        <p className="text-sm text-gray-600">V - D - E</p>
                         <p className="text-lg font-semibold">
-                          {stats.assists || stats.aces || stats.winners || 0}
+                          {stats.wins} - {stats.losses} - {stats.draws}
                         </p>
                       </div>
                       <div>
-                        <p className="text-sm text-gray-600">Por Jogo</p>
+                        <p className="text-sm text-gray-600">
+                          {stats.assists > 0 ? "Assistências" : stats.aces > 0 ? "Aces" : "Assistências"}
+                        </p>
                         <p className="text-lg font-semibold text-purple-600">
-                          {stats.games > 0
-                            ? ((stats.goals || stats.points || 0) / stats.games).toFixed(1)
-                            : 0}
+                          {stats.assists > 0 ? stats.assists : stats.aces > 0 ? stats.aces : stats.assists}
                         </p>
                       </div>
                     </div>
                     <div className="pt-2 border-t">
-                      <p className="text-xs text-gray-500">{stats.hours || 0}h jogadas</p>
+                      <p className="text-xs text-gray-500">{stats.hours}h jogadas</p>
                     </div>
                   </CardContent>
                 </Card>
@@ -273,13 +416,13 @@ export default function StatsScreen() {
           <Card>
             <CardHeader>
               <CardTitle>Progresso Mensal</CardTitle>
-              <CardDescription>Evolução dos teus jogos ao longo dos últimos meses</CardDescription>
+              <CardDescription>Evolução dos teus jogos ao longo dos últimos 6 meses</CardDescription>
             </CardHeader>
             <CardContent>
-              {sortedProgress.length === 0 ? (
+              {!hasGames ? (
                 <div className="text-center py-12">
                   <BarChart3 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                  <p className="text-gray-600">Ainda não há dados de progresso</p>
+                  <p className="text-gray-600">Ainda não tens jogos</p>
                   <p className="text-sm text-gray-500">Joga partidas para ver o teu progresso ao longo do tempo!</p>
                 </div>
               ) : (
@@ -310,12 +453,12 @@ export default function StatsScreen() {
 
                       {/* Data visualization */}
                       <div className="relative h-full flex items-end justify-between px-4">
-                        {sortedProgress.map((progress) => {
-                          const gamesHeight = (progress.games / maxGames) * chartHeight
-                          const winsHeight = (progress.wins / maxGames) * chartHeight
+                        {monthlyProgress.map((month) => {
+                          const gamesHeight = (month.games / maxGames) * chartHeight
+                          const winsHeight = (month.wins / maxGames) * chartHeight
 
                           return (
-                            <div key={`${progress.year}-${progress.month}`} className="flex flex-col items-center gap-2">
+                            <div key={month.key} className="flex flex-col items-center gap-2">
                               {/* Bars */}
                               <div className="flex items-end gap-1">
                                 {/* Total games bar */}
@@ -324,7 +467,7 @@ export default function StatsScreen() {
                                   style={{ height: `${gamesHeight}px` }}
                                 >
                                   <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                    {progress.games} jogos
+                                    {month.games} jogos
                                   </div>
                                 </div>
                                 {/* Wins bar */}
@@ -333,12 +476,12 @@ export default function StatsScreen() {
                                   style={{ height: `${winsHeight}px` }}
                                 >
                                   <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                    {progress.wins} vitórias
+                                    {month.wins} vitórias
                                   </div>
                                 </div>
                               </div>
                               {/* Month label */}
-                              <span className="text-xs text-gray-600 font-medium">{progress.month}</span>
+                              <span className="text-xs text-gray-600 font-medium">{month.label}</span>
                             </div>
                           )
                         })}
@@ -358,26 +501,44 @@ export default function StatsScreen() {
                     </div>
                   </div>
 
+                  {/* Monthly progress bars */}
+                  <div className="space-y-3 mt-6">
+                    {monthlyProgress.map((month) => (
+                      <div key={`bar-${month.key}`} className="space-y-1">
+                        <div className="flex justify-between text-sm">
+                          <span className="font-medium text-gray-700 capitalize">{month.label}</span>
+                          <span className="text-gray-500">
+                            {month.games} jogos • {month.wins} vitórias
+                          </span>
+                        </div>
+                        <Progress
+                          value={(month.games / maxGames) * 100}
+                          className="h-2"
+                        />
+                      </div>
+                    ))}
+                  </div>
+
                   {/* Summary stats */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
                     <div className="text-center p-4 bg-blue-50 rounded-lg">
                       <div className="text-2xl font-bold text-blue-600">
-                        {sortedProgress.reduce((sum, m) => sum + m.games, 0)}
+                        {monthlyProgress.reduce((sum, m) => sum + m.games, 0)}
                       </div>
                       <div className="text-sm text-gray-600">Total de Jogos</div>
                     </div>
                     <div className="text-center p-4 bg-green-50 rounded-lg">
                       <div className="text-2xl font-bold text-green-600">
-                        {sortedProgress.reduce((sum, m) => sum + m.wins, 0)}
+                        {monthlyProgress.reduce((sum, m) => sum + m.wins, 0)}
                       </div>
                       <div className="text-sm text-gray-600">Total de Vitórias</div>
                     </div>
                     <div className="text-center p-4 bg-purple-50 rounded-lg">
                       <div className="text-2xl font-bold text-purple-600">
-                        {sortedProgress.reduce((sum, m) => sum + m.games, 0) > 0
+                        {monthlyProgress.reduce((sum, m) => sum + m.games, 0) > 0
                           ? Math.round(
-                              (sortedProgress.reduce((sum, m) => sum + m.wins, 0) /
-                                sortedProgress.reduce((sum, m) => sum + m.games, 0)) *
+                              (monthlyProgress.reduce((sum, m) => sum + m.wins, 0) /
+                                monthlyProgress.reduce((sum, m) => sum + m.games, 0)) *
                                 100
                             )
                           : 0}
@@ -393,51 +554,38 @@ export default function StatsScreen() {
         </TabsContent>
 
         <TabsContent value="achievements" className="space-y-6">
-          {(!achievements || achievements.length === 0) ? (
-            <Card className="bg-gray-50">
-              <CardContent className="p-12 text-center">
-                <Award className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                  Sem conquistas ainda
-                </h3>
-                <p className="text-gray-600">
-                  Joga partidas para desbloqueares conquistas!
-                </p>
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {achievements.map((achievement) => (
-                <Card
-                  key={achievement.id}
-                  className={achievement.completed ? "border-green-200 bg-green-50" : ""}
-                >
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <Award className={`w-5 h-5 ${achievement.completed ? "text-green-600" : "text-gray-400"}`} />
-                        <h3 className="font-semibold">{achievement.name}</h3>
-                      </div>
-                      {achievement.completed && <Badge className="bg-green-500">Completo</Badge>}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {achievements.map((achievement) => (
+              <Card
+                key={achievement.id}
+                className={achievement.completed ? "border-green-200 bg-green-50" : ""}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl leading-none">{achievement.icon}</span>
+                      <Award className={`w-5 h-5 ${achievement.completed ? "text-green-600" : "text-gray-400"}`} />
+                      <h3 className="font-semibold">{achievement.name}</h3>
                     </div>
-                    <p className="text-sm text-gray-600 mb-3">{achievement.description}</p>
-                    {!achievement.completed && achievement.progress !== undefined && achievement.maxProgress && (
-                      <div className="space-y-1">
-                        <div className="flex justify-between text-xs">
-                          <span>Progresso</span>
-                          <span>{achievement.progress}/{achievement.maxProgress}</span>
-                        </div>
-                        <Progress
-                          value={(achievement.progress / achievement.maxProgress) * 100}
-                          className="h-2"
-                        />
+                    {achievement.completed && <Badge className="bg-green-500">Completo</Badge>}
+                  </div>
+                  <p className="text-sm text-gray-600 mb-3">{achievement.description}</p>
+                  {!achievement.completed && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs">
+                        <span>Progresso</span>
+                        <span>{achievement.progress}/{achievement.maxProgress}</span>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+                      <Progress
+                        value={(achievement.progress / achievement.maxProgress) * 100}
+                        className="h-2"
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         </TabsContent>
       </Tabs>
     </div>

@@ -28,6 +28,26 @@ import { db, storage } from "./config";
 type DocumentData = Record<string, unknown>;
 type DocumentWithId = DocumentData & { id: string };
 
+// Firestore rejects `undefined` field values, so writes must be sanitized.
+// Only plain objects/arrays are traversed — Timestamp, FieldValue and other
+// SDK sentinel classes pass through untouched.
+const stripUndefinedDeep = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map(stripUndefinedDeep);
+  }
+  if (value && typeof value === "object" && value.constructor === Object) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, stripUndefinedDeep(v)])
+    );
+  }
+  return value;
+};
+
+const sanitizeData = (data: DocumentData): DocumentData =>
+  stripUndefinedDeep(data) as DocumentData;
+
 // Fetch all documents from a collection
 export const fetchDocuments = async (collPath: string, constraints?: QueryConstraint[]) => {
   try {
@@ -129,7 +149,7 @@ export const uploadImage = async (path: string, file: File) => {
 export const handleAddDoc = async (data: DocumentData, collPath: string) => {
   try {
     const docRef = await addDoc(collection(db, collPath), {
-      ...data,
+      ...sanitizeData(data),
       createdAt: Timestamp.fromDate(new Date()),
     });
     const newDocSnap = await getDoc(docRef);
@@ -150,7 +170,7 @@ export const handleSetDoc = async (
   try {
     const docRef = doc(db, collPath, id);
     const payload = {
-      ...data,
+      ...sanitizeData(data),
       createdAt: Timestamp.fromDate(new Date()),
     };
     await setDoc(docRef, payload, { merge });
@@ -170,7 +190,7 @@ export const handleEditDoc = async (
 ) => {
   try {
     const updatePayload = {
-      ...updatedData,
+      ...sanitizeData(updatedData),
       updatedAt: Timestamp.fromDate(new Date())
     };
     await updateDoc(doc(db, collPath, id), updatePayload);
@@ -200,7 +220,7 @@ export const handleBulkImport = async (items: DocumentData[], collectionName: st
     const importedItems = []
     for (const item of items) {
       const docRef = await addDoc(collection(db, collectionName), {
-        ...item,
+        ...sanitizeData(item),
         createdAt: Timestamp.fromDate(new Date())
       })
       importedItems.push({ id: docRef.id, ...item })

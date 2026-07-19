@@ -1,10 +1,11 @@
 "use client"
 
 import { useMemo } from "react"
+import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Calendar, MapPin, Clock, Trophy, Target, Play, Star, Loader2, History } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
@@ -58,11 +59,13 @@ export default function MatchHistoryScreen() {
     const draws = matchHistory.filter(m => m.result === "draw").length
     const thisMonth = matchHistory.filter(m => new Date(m.date) >= thisMonthStart).length
 
-    const totalRating = matchHistory.reduce((acc, m) => acc + (m.myStats.rating || 0), 0)
-    const averageRating = matchHistory.length > 0 ? totalRating / matchHistory.length : 0
+    const ratedMatches = matchHistory.filter(m => m.myStats.rating != null)
+    const totalRating = ratedMatches.reduce((acc, m) => acc + (m.myStats.rating || 0), 0)
+    const averageRating = ratedMatches.length > 0 ? totalRating / ratedMatches.length : 0
 
     const totalMinutes = matchHistory.reduce((acc, m) => {
-      const mins = parseInt(m.duration) || 60
+      const durationMatch = /(\d+)\s*min/.exec(m.duration || "")
+      const mins = durationMatch ? parseInt(durationMatch[1]) : parseInt(m.duration) || 60
       return acc + mins
     }, 0)
 
@@ -288,7 +291,6 @@ export default function MatchHistoryScreen() {
                         <h4 className="font-medium text-gray-900">Melhor Jogador</h4>
                         <div className="flex items-center gap-2">
                           <Avatar className="w-8 h-8">
-                            <AvatarImage src="/placeholder.svg?height=32&width=32" />
                             <AvatarFallback>
                               {match.mvp
                                 .split(" ")
@@ -311,13 +313,9 @@ export default function MatchHistoryScreen() {
                     <div className="space-y-2">
                       <h4 className="font-medium text-gray-900">Ações</h4>
                       <div className="space-y-2">
-                        <Button variant="outline" size="sm" className="w-full">
-                          Ver Detalhes
-                        </Button>
-                        {match.hasRecording && (
-                          <Button variant="outline" size="sm" className="w-full">
-                            <Play className="w-4 h-4 mr-1" />
-                            Ver Gravação
+                        {match.matchId && (
+                          <Button variant="outline" size="sm" className="w-full" asChild>
+                            <Link href={`/app/game/${match.matchId}`}>Ver Detalhes</Link>
                           </Button>
                         )}
                       </div>

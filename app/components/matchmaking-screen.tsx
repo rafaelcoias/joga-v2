@@ -5,7 +5,7 @@ import { useState, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -20,13 +20,15 @@ import {
   DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog"
-import { MapPin, Clock, Users, Star, Plus, Home, Calendar, Loader2, Zap, X, Euro, Eye } from "lucide-react"
+import { MapPin, Clock, Users, Star, Plus, Home, Calendar, Loader2, Zap, X, Euro, Eye, Flame, List } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useCollection, useQuery, useCRUD } from "@/hooks/useFirestore"
+import { joinMatch, registerLocalGame } from "@/lib/firebase/matchService"
 import { Match, LocalGame } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { where } from "firebase/firestore"
 import Link from "next/link"
+import MatchSwipeDeck from "./match-swipe-deck"
 
 export default function MatchMakingScreen() {
   const { user } = useAuth()
@@ -34,6 +36,7 @@ export default function MatchMakingScreen() {
   const [selectedSport, setSelectedSport] = useState("all")
   const [selectedLevel, setSelectedLevel] = useState("all")
   const [selectedMode, setSelectedMode] = useState("normal")
+  const [viewMode, setViewMode] = useState<"deck" | "list" | "mine">("deck")
   const [localGameDialogOpen, setLocalGameDialogOpen] = useState(false)
   const [createMatchDialogOpen, setCreateMatchDialogOpen] = useState(false)
   const [joiningMatchId, setJoiningMatchId] = useState<string | null>(null)
@@ -63,9 +66,27 @@ export default function MatchMakingScreen() {
     { enabled: !!user?.id && selectedMode === "local", realtime: true }
   )
 
+  // Games the user is part of (organized or joined), any status
+  const { data: myMatches } = useQuery<Match>(
+    "matches",
+    [{ field: "participants", operator: "array-contains", value: user?.id || "" }],
+    { enabled: !!user?.id, realtime: true }
+  )
+
+  // My games sorted: pending-result first, then upcoming by date, then past
+  const sortedMyMatches = useMemo(() => {
+    if (!myMatches) return []
+    const today = new Date().toISOString().slice(0, 10)
+    const rank = (m: Match) => {
+      if (!m.hasHappened && m.date < today && m.status !== "cancelled") return 0 // needs result
+      if (!m.hasHappened && m.status !== "cancelled") return 1 // upcoming
+      return 2 // completed / cancelled
+    }
+    return [...myMatches].sort((a, b) => rank(a) - rank(b) || a.date.localeCompare(b.date))
+  }, [myMatches])
+
   // CRUD operations
-  const { create: createMatch, update: updateMatch } = useCRUD<Match>("matches")
-  const { create: createLocalGame } = useCRUD<LocalGame>("localGames")
+  const { create: createMatch } = useCRUD<Match>("matches")
 
   // Filter matches based on mode, sport, and level
   const filteredMatches = useMemo(() => {
@@ -179,49 +200,17 @@ export default function MatchMakingScreen() {
     setJoiningMatchId(matchId)
 
     try {
-      const match = sortedMatches?.find((m) => m.id === matchId)
-      if (!match) return
-
-      // Check if already joined
-      if (match.participants?.includes(user.id)) {
-        toast({
-          title: "Já inscrito",
-          description: "Já estás inscrito neste jogo.",
-        })
-        return
-      }
-
-      // Check if match is full
-      const currentPlayers = match.participants?.length || 0
-      if (currentPlayers >= match.totalPlayers) {
-        toast({
-          title: "Jogo cheio",
-          description: "Este jogo já está completo.",
-          variant: "destructive",
-        })
-        return
-      }
-
-      // Add user to participants
-      const newParticipants = [...(match.participants || []), user.id]
-      const newParticipantNames = [...(match.participantNames || []), user.displayName || `${user.firstName} ${user.lastName}`]
-      const newPlayersNeeded = match.playersNeeded - 1
-
-      await updateMatch(matchId, {
-        participants: newParticipants,
-        participantNames: newParticipantNames,
-        playersNeeded: newPlayersNeeded,
-        status: newPlayersNeeded <= 0 ? "full" : "open",
-      })
+      // Transactional join — safe against concurrent joins and roster desync
+      await joinMatch(matchId, user)
 
       toast({
         title: "Inscrição confirmada!",
         description: "Juntaste-te ao jogo com sucesso.",
       })
-    } catch {
+    } catch (err) {
       toast({
         title: "Erro",
-        description: "Não foi possível inscrever-te no jogo.",
+        description: err instanceof Error ? err.message : "Não foi possível inscrever-te no jogo.",
         variant: "destructive",
       })
     } finally {
@@ -244,8 +233,13 @@ export default function MatchMakingScreen() {
       const validParticipantNames = newMatch.participantNames.filter(name => name.trim() !== "")
       const organizerName = user.displayName || `${user.firstName} ${user.lastName}`
 
-      // Always include organizer
+      // Roster arrays are index-aligned: guests added by name have "" as id
       const allParticipantNames = [organizerName, ...validParticipantNames]
+      const allParticipantIds = [user.id, ...validParticipantNames.map(() => "")]
+
+      // The roster can never exceed the total player count
+      const totalPlayers = Math.max(parseInt(newMatch.totalPlayers) || 2, allParticipantNames.length)
+      const playersNeeded = Math.max(0, totalPlayers - allParticipantNames.length)
 
       const matchData = {
         sport: newMatch.sport,
@@ -253,16 +247,16 @@ export default function MatchMakingScreen() {
         venueName: newMatch.venueName || newMatch.location,
         date: newMatch.date,
         time: newMatch.time,
-        totalPlayers: parseInt(newMatch.totalPlayers),
-        playersNeeded: parseInt(newMatch.totalPlayers) - allParticipantNames.length,
+        totalPlayers,
+        playersNeeded,
         level: newMatch.level,
         organizer: organizerName,
         organizerId: user.id,
         rating: 0,
         mode: selectedMode === "ranked" ? "ranked" as const : "normal" as const,
-        status: "open" as const,
-        participants: [user.id], // User IDs - only organizer for now
-        participantNames: allParticipantNames, // Display names
+        status: playersNeeded === 0 ? "full" as const : "open" as const,
+        participants: allParticipantIds,
+        participantNames: allParticipantNames,
         totalPrice: parseFloat(newMatch.totalPrice) || 0,
         ...(selectedMode === "ranked" ? {
           rankPoints: parseInt(newMatch.rankPoints) || 0,
@@ -327,9 +321,28 @@ export default function MatchMakingScreen() {
       // Filter empty participants
       const validParticipants = localGameForm.participants.filter(p => p.trim() !== "")
 
-      // Base game data (without result/stats if game hasn't happened)
-      const gameData: Record<string, unknown> = {
-        userId: user.id,
+      // Map the free-text result to win/loss/draw
+      let gameResult: "win" | "loss" | "draw" | undefined
+      if (localGameForm.hasHappened && localGameForm.result) {
+        const result = localGameForm.result.toLowerCase()
+        gameResult = "draw"
+        if (result.includes("vitória") || result.includes("vitoria")) {
+          gameResult = "win"
+        } else if (result.includes("derrota")) {
+          gameResult = "loss"
+        }
+      }
+
+      // Build myStats object only with defined values
+      const myStats: Record<string, number> = {}
+      if (localGameForm.myGoals) myStats.goals = parseInt(localGameForm.myGoals)
+      if (localGameForm.myAssists) myStats.assists = parseInt(localGameForm.myAssists)
+      if (localGameForm.myPoints) myStats.points = parseInt(localGameForm.myPoints)
+      if (localGameForm.myAces) myStats.aces = parseInt(localGameForm.myAces)
+
+      // Transactional: also updates the user's counters + match history
+      // when the game already happened
+      await registerLocalGame(user, {
         sport: localGameForm.sport,
         location: localGameForm.location,
         date: localGameForm.date,
@@ -337,38 +350,15 @@ export default function MatchMakingScreen() {
         duration: localGameForm.duration,
         participants: validParticipants,
         hasHappened: localGameForm.hasHappened,
-        ...(localGameForm.notes ? { notes: localGameForm.notes } : {}),
-      }
-
-      // Only add result and stats if game has happened
-      if (localGameForm.hasHappened && localGameForm.result) {
-        const result = localGameForm.result.toLowerCase()
-        let gameResult: "win" | "loss" | "draw" = "draw"
-        if (result.includes("vitória") || result.includes("vitoria")) {
-          gameResult = "win"
-        } else if (result.includes("derrota")) {
-          gameResult = "loss"
-        }
-        gameData.result = gameResult
-
-        // Build myStats object only with defined values
-        const myStats: Record<string, number> = {}
-        if (localGameForm.myGoals) myStats.goals = parseInt(localGameForm.myGoals)
-        if (localGameForm.myAssists) myStats.assists = parseInt(localGameForm.myAssists)
-        if (localGameForm.myPoints) myStats.points = parseInt(localGameForm.myPoints)
-        if (localGameForm.myAces) myStats.aces = parseInt(localGameForm.myAces)
-
-        if (Object.keys(myStats).length > 0) {
-          gameData.myStats = myStats
-        }
-      }
-
-      await createLocalGame(gameData as Parameters<typeof createLocalGame>[0])
+        result: gameResult,
+        myStats,
+        notes: localGameForm.notes,
+      })
 
       toast({
         title: "Jogo registado!",
         description: localGameForm.hasHappened
-          ? "O teu jogo local foi registado com sucesso."
+          ? "Jogo registado e estatísticas atualizadas!"
           : "O teu jogo local foi agendado. Podes adicionar o resultado depois.",
       })
 
@@ -1106,11 +1096,131 @@ export default function MatchMakingScreen() {
 
           {/* Available Matches */}
           <div className="space-y-4">
-            <h2 className="text-xl font-semibold text-gray-900">
-              {selectedMode === "ranked" ? "Jogos Arranca Disponíveis" : "Jogos Disponíveis"}
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-gray-900">
+                {selectedMode === "ranked" ? "Jogos Arranca Disponíveis" : "Jogos Disponíveis"}
+              </h2>
+              <div className="bg-gray-100 p-1 rounded-lg flex">
+                <button
+                  onClick={() => setViewMode("deck")}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1 ${
+                    viewMode === "deck" ? "bg-white text-green-600 shadow-sm" : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <Flame className="w-4 h-4" />
+                  Descobrir
+                </button>
+                <button
+                  onClick={() => setViewMode("list")}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1 ${
+                    viewMode === "list" ? "bg-white text-green-600 shadow-sm" : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <List className="w-4 h-4" />
+                  Lista
+                </button>
+                <button
+                  onClick={() => setViewMode("mine")}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1 ${
+                    viewMode === "mine" ? "bg-white text-green-600 shadow-sm" : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  <Users className="w-4 h-4" />
+                  Meus Jogos
+                  {sortedMyMatches.length > 0 && (
+                    <span className="ml-1 bg-green-100 text-green-700 text-xs rounded-full px-1.5">
+                      {sortedMyMatches.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            </div>
 
-            {filteredMatches.length === 0 ? (
+            {viewMode === "mine" ? (
+              sortedMyMatches.length === 0 ? (
+                <Card className="bg-gray-50">
+                  <CardContent className="p-12 text-center">
+                    <Users className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                      Ainda não tens jogos
+                    </h3>
+                    <p className="text-gray-600">
+                      Junta-te a um jogo no Descobrir ou cria o teu próprio jogo.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <div className="space-y-4">
+                  {sortedMyMatches.map((match) => {
+                    const isMatchOrganizer = match.organizerId === user?.id
+                    const today = new Date().toISOString().slice(0, 10)
+                    const needsResult =
+                      !match.hasHappened && match.date < today && match.status !== "cancelled"
+                    return (
+                      <Card
+                        key={match.id}
+                        className={`hover:shadow-lg transition-shadow ${
+                          needsResult ? "border-yellow-300 bg-yellow-50/50" : ""
+                        }`}
+                      >
+                        <CardContent className="p-4 flex items-center justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-gray-900">{match.sport}</span>
+                              {match.mode === "ranked" && (
+                                <Badge className="bg-yellow-100 text-yellow-800">Arranca</Badge>
+                              )}
+                              {isMatchOrganizer && (
+                                <Badge variant="outline" className="text-xs">Organizador</Badge>
+                              )}
+                              {match.hasHappened ? (
+                                <Badge className="bg-blue-100 text-blue-800">Concluído</Badge>
+                              ) : match.status === "cancelled" ? (
+                                <Badge className="bg-red-100 text-red-800">Cancelado</Badge>
+                              ) : needsResult ? (
+                                <Badge className="bg-yellow-100 text-yellow-800">Por concluir</Badge>
+                              ) : match.status === "full" ? (
+                                <Badge className="bg-orange-100 text-orange-800">Lotado</Badge>
+                              ) : (
+                                <Badge className="bg-green-100 text-green-800">Aberto</Badge>
+                              )}
+                            </div>
+                            <p className="text-sm text-gray-600 mt-1 flex items-center gap-3 flex-wrap">
+                              <span className="flex items-center gap-1">
+                                <MapPin className="w-4 h-4" />
+                                {match.venueName || match.location}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-4 h-4" />
+                                {new Date(match.date).toLocaleDateString("pt-PT")} às {match.time}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <Users className="w-4 h-4" />
+                                {match.totalPlayers - match.playersNeeded}/{match.totalPlayers}
+                              </span>
+                            </p>
+                          </div>
+                          <Link href={`/app/game/${match.id}`} className="shrink-0">
+                            <Button
+                              size="sm"
+                              className={
+                                needsResult && isMatchOrganizer
+                                  ? "bg-yellow-500 hover:bg-yellow-600 text-white"
+                                  : "bg-green-600 hover:bg-green-700"
+                              }
+                            >
+                              {needsResult && isMatchOrganizer ? "Inserir resultado" : "Ver jogo"}
+                            </Button>
+                          </Link>
+                        </CardContent>
+                      </Card>
+                    )
+                  })}
+                </div>
+              )
+            ) : viewMode === "deck" ? (
+              <MatchSwipeDeck matches={filteredMatches} user={user} />
+            ) : filteredMatches.length === 0 ? (
               <Card className="bg-gray-50">
                 <CardContent className="p-12 text-center">
                   <Zap className="w-12 h-12 text-gray-400 mx-auto mb-4" />
@@ -1164,12 +1274,13 @@ export default function MatchMakingScreen() {
                       <div className="flex justify-between items-center">
                         <div className="flex items-center gap-4">
                           <Avatar>
-                            <AvatarImage src="/placeholder.svg?height=32&width=32" />
                             <AvatarFallback>
                               {match.organizer
                                 ?.split(" ")
                                 .map((n) => n[0])
-                                .join("") || "?"}
+                                .join("")
+                                .toUpperCase()
+                                .slice(0, 2) || "?"}
                             </AvatarFallback>
                           </Avatar>
                           <div>

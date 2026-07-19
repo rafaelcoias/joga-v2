@@ -14,11 +14,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Search, MapPin, Trophy, Star, UserPlus, Loader2, Users, GamepadIcon, Calendar } from "lucide-react"
+import { Search, MapPin, Trophy, Star, UserPlus, UserCheck, UserX, Loader2, Users, GamepadIcon, Calendar } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useCollection, useCRUD, useQuery } from "@/hooks/useFirestore"
 import { User, FriendRequest } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
+import { fetchDocument } from "@/lib/firebase/server"
+import { sendFriendRequestEmail, sendFriendAcceptedEmail } from "@/lib/email/emailService"
 
 export default function PlayerSearchScreen() {
   const { user } = useAuth()
@@ -27,6 +29,7 @@ export default function PlayerSearchScreen() {
   const [selectedSport, setSelectedSport] = useState("all")
   const [selectedLocation, setSelectedLocation] = useState("all")
   const [sendingRequest, setSendingRequest] = useState<string | null>(null)
+  const [respondingTo, setRespondingTo] = useState<string | null>(null)
   const [selectedPlayer, setSelectedPlayer] = useState<User | null>(null)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
 
@@ -48,7 +51,7 @@ export default function PlayerSearchScreen() {
   )
 
   // CRUD for friend requests
-  const { create: createFriendRequest } = useCRUD<FriendRequest>("friendRequests")
+  const { create: createFriendRequest, update: updateFriendRequest } = useCRUD<FriendRequest>("friendRequests")
 
   // Get unique locations from users for the filter
   const availableLocations = useMemo(() => {
@@ -136,12 +139,25 @@ export default function PlayerSearchScreen() {
       return
     }
 
+    // Prevent duplicate requests in either direction (pending or accepted)
+    const existingRequest =
+      sentRequests?.find((r) => r.receiverId === player.id && r.status !== "rejected") ||
+      receivedRequests?.find((r) => r.senderId === player.id && r.status !== "rejected")
+    if (existingRequest) {
+      toast({
+        title: "Pedido já existente",
+        description: "Já existe um pedido de amizade entre ti e este jogador.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setSendingRequest(player.id)
     try {
       const requestData: Omit<FriendRequest, "id" | "createdAt"> = {
         senderId: user.id,
         senderName: user.displayName || `${user.firstName} ${user.lastName}`,
-        senderPhoto: user.photoURL,
+        senderPhoto: user.photoURL || "",
         senderLevel: user.level || 1,
         receiverId: player.id,
         receiverName: player.displayName || `${player.firstName} ${player.lastName}`,
@@ -151,6 +167,9 @@ export default function PlayerSearchScreen() {
       }
 
       await createFriendRequest(requestData)
+
+      // Notify the receiver by email (fire-and-forget, never blocks the flow)
+      sendFriendRequestEmail(player.email, player.firstName || player.displayName, user.displayName)
 
       toast({
         title: "Pedido enviado!",
@@ -165,6 +184,64 @@ export default function PlayerSearchScreen() {
       })
     } finally {
       setSendingRequest(null)
+    }
+  }
+
+  const handleRespondRequest = async (player: User, status: "accepted" | "rejected") => {
+    const request = receivedRequests?.find(
+      (r) => r.senderId === player.id && r.status === "pending"
+    )
+    if (!request) {
+      toast({
+        title: "Erro",
+        description: "Não foi possível encontrar o pedido de amizade.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setRespondingTo(player.id)
+    try {
+      const updates: Partial<FriendRequest> & { acceptedAt?: Date } = { status }
+      if (status === "accepted") {
+        updates.acceptedAt = new Date()
+      }
+      await updateFriendRequest(request.id, updates)
+
+      if (status === "accepted") {
+        // Notify the original sender by email (fire-and-forget, never blocks the flow)
+        fetchDocument("users", request.senderId)
+          .then((doc) => {
+            const sender = doc as User | null
+            sendFriendAcceptedEmail(
+              sender?.email,
+              sender?.firstName || request.senderName,
+              user?.displayName || ""
+            )
+          })
+          .catch((err) => {
+            console.warn("Failed to send friend-accepted email:", err)
+          })
+
+        toast({
+          title: "Pedido aceite",
+          description: `${player.displayName || player.firstName} é agora teu amigo!`,
+        })
+      } else {
+        toast({
+          title: "Pedido recusado",
+          description: "O pedido de amizade foi recusado.",
+        })
+      }
+    } catch (err) {
+      console.error("Error responding to friend request:", err)
+      toast({
+        title: "Erro",
+        description: "Não foi possível responder ao pedido de amizade.",
+        variant: "destructive",
+      })
+    } finally {
+      setRespondingTo(null)
     }
   }
 
@@ -407,9 +484,31 @@ export default function PlayerSearchScreen() {
                         Pedido enviado
                       </Button>
                     ) : friendshipStatus === "pending_received" ? (
-                      <Button size="sm" variant="outline" disabled>
-                        Responder pedido
-                      </Button>
+                      <>
+                        <Button
+                          size="sm"
+                          className="bg-green-600 hover:bg-green-700"
+                          onClick={() => handleRespondRequest(player, "accepted")}
+                          disabled={respondingTo === player.id}
+                        >
+                          {respondingTo === player.id ? (
+                            <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                          ) : (
+                            <UserCheck className="w-4 h-4 mr-1" />
+                          )}
+                          Aceitar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-red-600 hover:text-red-700"
+                          onClick={() => handleRespondRequest(player, "rejected")}
+                          disabled={respondingTo === player.id}
+                        >
+                          <UserX className="w-4 h-4 mr-1" />
+                          Recusar
+                        </Button>
+                      </>
                     ) : (
                       <Button
                         size="sm"

@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import DashboardLayout from "../components/dashboard-layout"
 
 // Import all screen components
+import HomeScreen from "../components/home-screen"
 import MatchMakingScreen from "../components/matchmaking-screen"
 import RankingsScreen from "../components/rankings-screen"
 import BookingsScreen from "../components/bookings-screen"
@@ -15,23 +16,48 @@ import ProfileScreen from "../components/profile-screen"
 import StatsScreen from "../components/stats-screen"
 import ArenaManagementScreen from "../components/arena-management-screen"
 
-type Screen =
-  | "matchmaking"
-  | "rankings"
-  | "bookings"
-  | "venues"
-  | "history"
-  | "search"
-  | "friends"
-  | "stats"
-  | "profile"
-  | "arenas"
+const SCREENS = [
+  "home",
+  "matchmaking",
+  "rankings",
+  "bookings",
+  "venues",
+  "history",
+  "search",
+  "friends",
+  "stats",
+  "profile",
+  "arenas",
+] as const
+
+type Screen = (typeof SCREENS)[number]
+
+const isScreen = (value: string | null): value is Screen =>
+  !!value && (SCREENS as readonly string[]).includes(value)
 
 export default function JogaApp() {
-  const [currentScreen, setCurrentScreen] = useState<Screen>("matchmaking")
+  const [currentScreen, setCurrentScreen] = useState<Screen>("home")
+
+  // Honor deep links like /app?screen=rankings (used by the sidebar when
+  // navigating from standalone pages such as the game detail page)
+  useEffect(() => {
+    const param = new URLSearchParams(window.location.search).get("screen")
+    if (isScreen(param)) {
+      setCurrentScreen(param)
+    }
+  }, [])
+
+  const navigate = (screen: string) => {
+    if (!isScreen(screen)) return
+    setCurrentScreen(screen)
+    // Keep the URL shareable without triggering a Next.js navigation
+    window.history.replaceState(null, "", screen === "home" ? "/app" : `/app?screen=${screen}`)
+  }
 
   const renderScreen = () => {
     switch (currentScreen) {
+      case "home":
+        return <HomeScreen onNavigate={navigate} />
       case "matchmaking":
         return <MatchMakingScreen />
       case "rankings":
@@ -53,15 +79,12 @@ export default function JogaApp() {
       case "arenas":
         return <ArenaManagementScreen />
       default:
-        return <MatchMakingScreen />
+        return <HomeScreen onNavigate={navigate} />
     }
   }
 
   return (
-    <DashboardLayout
-      activeScreen={currentScreen}
-      onNavigate={(screen) => setCurrentScreen(screen as Screen)}
-    >
+    <DashboardLayout activeScreen={currentScreen} onNavigate={navigate}>
       {renderScreen()}
     </DashboardLayout>
   )

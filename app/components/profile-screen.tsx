@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
@@ -11,8 +11,9 @@ import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Users, Trophy, Target, Settings, User, Mail, Lock, Bell, Shield, Smartphone, Eye, EyeOff, Loader2, Building2 } from "lucide-react"
+import { Users, Trophy, Target, Settings, User, Mail, Lock, Bell, Shield, Smartphone, Eye, EyeOff, Loader2, Building2, Crown } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
+import { uploadImage } from "@/lib/firebase/server"
 import { useCRUD } from "@/hooks/useFirestore"
 import { User as UserType } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
@@ -20,11 +21,13 @@ import { updatePassword, EmailAuthProvider, reauthenticateWithCredential } from 
 import { auth } from "@/lib/firebase/config"
 
 export default function ProfileScreen() {
-  const { user, loading: authLoading } = useAuth()
+  const { user, loading: authLoading, updateUserProfile, refreshUser } = useAuth()
   const { toast } = useToast()
   const [showPassword, setShowPassword] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savingPassword, setSavingPassword] = useState(false)
+  const [uploadingPhoto, setUploadingPhoto] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Profile form state
   const [profileData, setProfileData] = useState({
@@ -73,7 +76,7 @@ export default function ProfileScreen() {
         firstName: user.firstName || "",
         lastName: user.lastName || "",
         bio: user.bio || "",
-        location: user.location || "",
+        location: user.location || "Lisboa",
         phone: user.phone || "",
       })
       if (user.preferences?.notifications) {
@@ -96,7 +99,8 @@ export default function ProfileScreen() {
 
     setSaving(true)
     try {
-      await updateUser(user.id, {
+      // updateUserProfile persiste, atualiza o contexto de auth e mostra o toast
+      await updateUserProfile({
         firstName: profileData.firstName,
         lastName: profileData.lastName,
         displayName: `${profileData.firstName} ${profileData.lastName}`,
@@ -104,19 +108,53 @@ export default function ProfileScreen() {
         location: profileData.location,
         phone: profileData.phone,
       })
-
-      toast({
-        title: "Perfil atualizado",
-        description: "As tuas informações foram guardadas com sucesso.",
-      })
     } catch {
-      toast({
-        title: "Erro",
-        description: "Não foi possível guardar as alterações.",
-        variant: "destructive",
-      })
+      // O toast de erro já é mostrado pelo updateUserProfile
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handlePhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // Permite voltar a escolher o mesmo ficheiro
+    e.target.value = ""
+    if (!file || !user?.id) return
+
+    if (!file.type.startsWith("image/")) {
+      toast({
+        title: "Erro",
+        description: "O ficheiro escolhido não é uma imagem.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast({
+        title: "Erro",
+        description: "A imagem não pode ter mais de 5MB.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setUploadingPhoto(true)
+    try {
+      const photoURL = await uploadImage(`users/${user.id}/profile.jpg`, file)
+      // updateUserProfile persiste, atualiza o contexto e mostra o toast de sucesso
+      await updateUserProfile({ photoURL })
+    } catch (error) {
+      // updateUserProfile já mostra toast nos seus erros; só o upload precisa de um aqui
+      if (error instanceof Error && error.message === "Failed to upload image") {
+        toast({
+          title: "Erro",
+          description: "Não foi possível carregar a imagem. Tenta novamente.",
+          variant: "destructive",
+        })
+      }
+    } finally {
+      setUploadingPhoto(false)
     }
   }
 
@@ -133,6 +171,8 @@ export default function ProfileScreen() {
         },
         privacy,
       })
+
+      await refreshUser()
 
       toast({
         title: "Configurações guardadas",
@@ -208,7 +248,7 @@ export default function ProfileScreen() {
       const firebaseError = error as { code?: string }
       let errorMessage = "Não foi possível alterar a password."
 
-      if (firebaseError.code === "auth/wrong-password") {
+      if (firebaseError.code === "auth/wrong-password" || firebaseError.code === "auth/invalid-credential") {
         errorMessage = "A password atual está incorreta."
       } else if (firebaseError.code === "auth/weak-password") {
         errorMessage = "A nova password é demasiado fraca."
@@ -288,7 +328,7 @@ export default function ProfileScreen() {
           </Card>
 
           {/* Stats */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-sm font-medium">Vitórias</CardTitle>
@@ -318,6 +358,16 @@ export default function ProfileScreen() {
                 <div className="text-2xl font-bold text-purple-600">{user.assists || 0}</div>
               </CardContent>
             </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">MVPs</CardTitle>
+                <Crown className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold text-amber-600">{user.mvps || 0}</div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* Profile Edit Form */}
@@ -340,7 +390,21 @@ export default function ProfileScreen() {
                   </AvatarFallback>
                 </Avatar>
                 <div>
-                  <Button variant="outline">Alterar Foto</Button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handlePhotoSelected}
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingPhoto}
+                  >
+                    {uploadingPhoto ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                    {uploadingPhoto ? "A carregar..." : "Alterar Foto"}
+                  </Button>
                   <p className="text-sm text-gray-600 mt-1">JPG, PNG até 5MB</p>
                 </div>
               </div>
@@ -388,18 +452,18 @@ export default function ProfileScreen() {
               <div className="space-y-2">
                 <Label htmlFor="location">Localização</Label>
                 <Select
-                  value={profileData.location.toLowerCase() || "lisboa"}
-                  onValueChange={(v) => setProfileData({ ...profileData, location: v.charAt(0).toUpperCase() + v.slice(1) })}
+                  value={profileData.location}
+                  onValueChange={(v) => setProfileData({ ...profileData, location: v })}
                 >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="lisboa">Lisboa</SelectItem>
-                    <SelectItem value="porto">Porto</SelectItem>
-                    <SelectItem value="coimbra">Coimbra</SelectItem>
-                    <SelectItem value="braga">Braga</SelectItem>
-                    <SelectItem value="faro">Faro</SelectItem>
+                    <SelectItem value="Lisboa">Lisboa</SelectItem>
+                    <SelectItem value="Porto">Porto</SelectItem>
+                    <SelectItem value="Coimbra">Coimbra</SelectItem>
+                    <SelectItem value="Braga">Braga</SelectItem>
+                    <SelectItem value="Faro">Faro</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -691,6 +755,7 @@ export default function ProfileScreen() {
                       setSaving(true)
                       try {
                         await updateUser(user.id, { role: "organizer" as const })
+                        await refreshUser()
                         toast({
                           title: "Conta atualizada!",
                           description: "Agora és um organizador. Acede ao menu 'Gerir Arenas' para começar.",
@@ -717,7 +782,7 @@ export default function ProfileScreen() {
                 <div className="p-4 border border-green-200 bg-green-50 rounded-lg">
                   <h4 className="font-medium text-green-900 mb-2">Conta de Organizador Ativa</h4>
                   <p className="text-sm text-green-700">
-                    Podes criar e gerir arenas desportivas através do menu "Gerir Arenas".
+                    Podes criar e gerir arenas desportivas através do menu &quot;Gerir Arenas&quot;.
                   </p>
                 </div>
               )}

@@ -26,6 +26,7 @@ export interface User {
   points: number;
   aces: number;
   gamesPlayed: number;
+  mvps?: number; // Times elected MVP of a match
   role: UserRole; // User role for permissions
   sports?: string[]; // Sports the user plays
   status?: "online" | "offline" | "playing"; // Online status
@@ -73,7 +74,9 @@ export interface Match {
   rankPoints?: number; // Points for ranked mode
   minLevel?: number;
   status: "open" | "full" | "completed" | "cancelled";
-  participants: string[]; // User IDs
+  // Roster arrays are index-aligned: participantNames[i] is the display name
+  // for participants[i]; guests added by name have "" as their participant id.
+  participants: string[]; // User IDs ("" for name-only guests)
   participantNames?: string[]; // Display names for participants
   // Completed game fields
   hasHappened?: boolean; // Whether the game has already happened
@@ -81,7 +84,11 @@ export interface Match {
     score?: string;
     winner?: "team1" | "team2" | "draw";
     notes?: string;
+    mvp?: string; // Display name of the match MVP
+    mvpId?: string; // User ID of the MVP (empty for guests)
   };
+  teams?: Record<string, "team1" | "team2">; // Team assignment per user ID
+  statsApplied?: boolean; // Guards against double-counting stats on completion
   playerStats?: Record<string, MatchStats>; // Stats per participant userId
   createdAt: FirestoreTimestamp;
   updatedAt?: FirestoreTimestamp;
@@ -94,12 +101,15 @@ export interface Booking {
   matchId?: string;
   sport: string;
   venue: string;
+  venueId?: string;
   date: string;
   time: string;
   duration: string;
   players: number;
   status: "confirmed" | "pending" | "cancelled";
   price: string;
+  arenaBookingId?: string; // Linked arenaBookings doc when booked at an arena
+  venueType?: "arena" | "venue";
   createdAt: FirestoreTimestamp;
   updatedAt?: FirestoreTimestamp;
 }

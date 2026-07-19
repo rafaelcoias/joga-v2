@@ -26,11 +26,14 @@ import {
   SheetTrigger,
   SheetFooter,
 } from "@/components/ui/sheet"
-import { MapPin, Star, Euro, Search, Filter, Loader2, Clock, Phone, Mail, Calendar, SlidersHorizontal, X } from "lucide-react"
+import { MapPin, Star, Euro, Search, Loader2, Clock, Phone, Mail, Calendar, SlidersHorizontal, X } from "lucide-react"
 import { useCollection, useCRUD, useQuery } from "@/hooks/useFirestore"
-import { Arena, ArenaBooking, Venue } from "@/lib/types"
+import { Arena, ArenaBooking, User, Venue } from "@/lib/types"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { useToast } from "@/hooks/use-toast"
+import { findSlotConflict } from "@/lib/firebase/bookingService"
+import { fetchDocument } from "@/lib/firebase/server"
+import { sendBookingOrganizerEmail, sendBookingUserEmail } from "@/lib/email/emailService"
 import Image from "next/image"
 
 export default function VenuesScreen() {
@@ -72,20 +75,25 @@ export default function VenuesScreen() {
   // CRUD for bookings
   const { create: createBooking } = useCRUD<ArenaBooking>("arenaBookings")
 
-  // Convert legacy venues to arena format for unified display
+  // Convert legacy venues to arena format for unified display.
+  // Legacy venues keep their free-text availability as a display label.
   const allVenues = useMemo(() => {
-    const arenaList = arenas || []
-    const venueList = (legacyVenues || []).map(v => ({
-      ...v,
-      organizerId: "",
-      organizerName: "",
-      pricePerHour: parseFloat(v.pricePerHour) || 0,
-      openingHours: v.openingHours || "08:00",
-      closingHours: "22:00",
-      isActive: true,
-      totalReviews: 0,
-      images: v.image ? [v.image] : [],
-    } as Arena))
+    const arenaList: (Arena & { availabilityLabel?: string })[] = arenas || []
+    const venueList = (legacyVenues || []).map((v) => {
+      const { availability, ...rest } = v
+      return {
+        ...rest,
+        organizerId: "",
+        organizerName: "",
+        pricePerHour: parseFloat(v.pricePerHour) || 0,
+        openingHours: v.openingHours || "08:00",
+        closingHours: "22:00",
+        isActive: true,
+        totalReviews: 0,
+        images: v.image ? [v.image] : [],
+        availabilityLabel: availability,
+      } as Arena & { availabilityLabel?: string }
+    })
 
     return [...arenaList, ...venueList]
   }, [arenas, legacyVenues])
@@ -198,6 +206,22 @@ export default function VenuesScreen() {
       const endMinutes = (minutes + durationMinutes) % 60
       const endTime = `${String(endHours).padStart(2, "0")}:${String(endMinutes).padStart(2, "0")}`
 
+      // Block double-bookings: check the slot before creating
+      const conflict = await findSlotConflict(
+        selectedArena.id,
+        bookingForm.date,
+        bookingForm.time,
+        durationMinutes
+      )
+      if (conflict) {
+        toast({
+          title: "Horário indisponível",
+          description: `Esse horário já está reservado (${conflict.time}–${conflict.endTime}). Escolhe outro horário.`,
+          variant: "destructive",
+        })
+        return
+      }
+
       const bookingData: Omit<ArenaBooking, "id" | "createdAt" | "updatedAt"> = {
         arenaId: selectedArena.id,
         arenaName: selectedArena.name,
@@ -205,7 +229,7 @@ export default function VenuesScreen() {
         userId: user.id,
         userName: user.displayName || `${user.firstName} ${user.lastName}`,
         userEmail: user.email,
-        userPhone: user.phone,
+        userPhone: user.phone || "",
         date: bookingForm.date,
         time: bookingForm.time,
         endTime,
@@ -218,6 +242,39 @@ export default function VenuesScreen() {
       }
 
       await createBooking(bookingData)
+
+      // Email automations (fire-and-forget)
+      const emailInfo = {
+        venueName: selectedArena.name,
+        date: bookingForm.date,
+        time: bookingForm.time,
+        duration: `${durationMinutes} min`,
+        players: parseInt(bookingForm.players),
+        price: `€${totalPrice.toFixed(2)}`,
+      }
+      const userName = user.displayName || `${user.firstName} ${user.lastName}`
+      sendBookingUserEmail(user.email, user.firstName, emailInfo, "pending")
+
+      const arena = selectedArena
+      if (arena.email) {
+        sendBookingOrganizerEmail(arena.email, arena.organizerName || "Organizador", userName, emailInfo)
+      } else if (arena.organizerId) {
+        fetchDocument("users", arena.organizerId)
+          .then((docData) => {
+            const organizer = docData as User | null
+            if (organizer?.email) {
+              sendBookingOrganizerEmail(
+                organizer.email,
+                arena.organizerName || organizer.firstName || "Organizador",
+                userName,
+                emailInfo
+              )
+            }
+          })
+          .catch(() => {
+            // Email is a courtesy — never block the booking flow
+          })
+      }
 
       toast({
         title: "Reserva enviada!",
@@ -372,7 +429,7 @@ export default function VenuesScreen() {
             <div className="text-center">
               <MapPin className="w-12 h-12 text-gray-400 mx-auto mb-2" />
               <p className="text-gray-600">Mapa dos campos próximos</p>
-              <p className="text-sm text-gray-500">Integração com Google Maps</p>
+              <p className="text-sm text-gray-500">Mapa interativo em breve</p>
             </div>
           </div>
         </CardContent>
@@ -426,9 +483,11 @@ export default function VenuesScreen() {
                   </div>
                 )}
               </div>
-              <Badge className="absolute top-3 right-3 bg-green-500 hover:bg-green-600">
-                Disponível
-              </Badge>
+              {venue.isActive !== false && (
+                <Badge className="absolute top-3 right-3 bg-green-500 hover:bg-green-600">
+                  {venue.availabilityLabel || "Disponível"}
+                </Badge>
+              )}
             </div>
 
             <CardHeader>

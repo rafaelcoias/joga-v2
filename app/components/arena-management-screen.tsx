@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -35,6 +35,7 @@ import { useAuth } from "@/lib/contexts/AuthContext"
 import { useQuery, useCRUD } from "@/hooks/useFirestore"
 import { Arena, ArenaBooking } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
+import { sendBookingStatusEmail } from "@/lib/email/emailService"
 
 const AVAILABLE_SPORTS = ["Futebol", "Ténis", "Basquetebol", "Padel", "Voleibol", "Futsal"]
 const AVAILABLE_FACILITIES = ["Balneários", "Estacionamento", "Iluminação", "Bar/Cafetaria", "Equipamento para alugar", "Wi-Fi"]
@@ -60,6 +61,13 @@ export default function ArenaManagementScreen() {
     "arenaBookings",
     [{ field: "arenaId", operator: "==", value: selectedArenaForBookings || "" }],
     { enabled: !!selectedArenaForBookings, realtime: true }
+  )
+
+  // Fetch all bookings across the organizer's arenas (for dashboard stats)
+  const { data: allBookings } = useQuery<ArenaBooking>(
+    "arenaBookings",
+    [{ field: "organizerId", operator: "==", value: user?.id || "" }],
+    { enabled: !!user?.id && user?.role === "organizer", realtime: true }
   )
 
   // CRUD operations
@@ -170,9 +178,9 @@ export default function ArenaManagementScreen() {
         closingHours: arenaForm.closingHours,
         facilities: arenaForm.facilities,
         amenities: arenaForm.facilities,
-        phone: arenaForm.phone || undefined,
-        email: arenaForm.email || undefined,
-        website: arenaForm.website || undefined,
+        phone: arenaForm.phone || "",
+        email: arenaForm.email || "",
+        website: arenaForm.website || "",
       }
 
       await updateArena(editingArena.id, updateData)
@@ -233,12 +241,32 @@ export default function ArenaManagementScreen() {
     }
   }
 
-  const handleUpdateBookingStatus = async (bookingId: string, status: ArenaBooking["status"]) => {
+  const handleUpdateBookingStatus = async (booking: ArenaBooking, status: ArenaBooking["status"]) => {
     try {
-      await updateBooking(bookingId, { status })
+      await updateBooking(booking.id, { status })
+
+      // Notify the player about the decision (fire-and-forget)
+      if (status === "confirmed" || status === "cancelled") {
+        sendBookingStatusEmail(
+          booking.userEmail,
+          booking.userName,
+          {
+            venueName: booking.arenaName,
+            date: booking.date,
+            time: booking.time,
+            price: `€${(booking.totalPrice || 0).toFixed(2)}`,
+          },
+          status
+        )
+      }
+
+      const statusLabel =
+        status === "confirmed" ? "confirmada" :
+        status === "cancelled" ? "cancelada" :
+        status === "completed" ? "concluída" : "pendente"
       toast({
         title: "Reserva atualizada",
-        description: `O estado da reserva foi alterado para ${status}.`,
+        description: `A reserva foi ${statusLabel}.`,
       })
     } catch (err) {
       console.error("Error updating booking:", err)
@@ -290,8 +318,8 @@ export default function ArenaManagementScreen() {
   // Stats for dashboard
   const totalArenas = myArenas?.length || 0
   const activeArenas = myArenas?.filter(a => a.isActive).length || 0
-  const totalBookings = arenaBookings?.length || 0
-  const pendingBookings = arenaBookings?.filter(b => b.status === "pending").length || 0
+  const totalBookings = allBookings?.length || 0
+  const pendingBookings = allBookings?.filter(b => b.status === "pending").length || 0
 
   // Check if user is an organizer
   if (user?.role !== "organizer") {
@@ -532,7 +560,7 @@ export default function ArenaManagementScreen() {
                             <AlertDialogHeader>
                               <AlertDialogTitle>Eliminar Arena</AlertDialogTitle>
                               <AlertDialogDescription>
-                                Tens a certeza que queres eliminar "{arena.name}"? Esta ação não pode ser revertida.
+                                Tens a certeza que queres eliminar &quot;{arena.name}&quot;? Esta ação não pode ser revertida.
                               </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
@@ -645,7 +673,7 @@ export default function ArenaManagementScreen() {
                             <Button
                               size="sm"
                               className="bg-green-600 hover:bg-green-700"
-                              onClick={() => handleUpdateBookingStatus(booking.id, "confirmed")}
+                              onClick={() => handleUpdateBookingStatus(booking, "confirmed")}
                             >
                               Confirmar
                             </Button>
@@ -653,7 +681,7 @@ export default function ArenaManagementScreen() {
                               size="sm"
                               variant="outline"
                               className="text-red-600"
-                              onClick={() => handleUpdateBookingStatus(booking.id, "cancelled")}
+                              onClick={() => handleUpdateBookingStatus(booking, "cancelled")}
                             >
                               Cancelar
                             </Button>

@@ -1,3 +1,4 @@
+import Image from "next/image"
 import { Card, CardContent } from "@/components/ui/card"
 
 export default function Sports() {
@@ -55,7 +56,13 @@ export default function Sports() {
           {sports.map((sport, index) => (
             <Card key={index} className="overflow-hidden hover:shadow-xl transition-shadow pt-0 group">
               <div className="relative">
-                <img src={sport.image || "/placeholder.svg"} alt={sport.name} className="w-full h-48 object-cover group-hover:blur-[0px] group-hover:brightness-100 blur-[2px] brightness-90 transition-all" />
+                <Image
+                  src={sport.image}
+                  alt={sport.name}
+                  width={600}
+                  height={400}
+                  className="w-full h-48 object-cover group-hover:blur-[0px] group-hover:brightness-100 blur-[2px] brightness-90 transition-all"
+                />
                 <div className="absolute top-4 right-4 bg-white/90 backdrop-blur-sm rounded-full px-3 py-1">
                   <span className="text-sm font-medium text-gray-700">{sport.players}</span>
                 </div>

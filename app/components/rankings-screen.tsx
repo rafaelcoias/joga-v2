@@ -6,14 +6,41 @@ import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Trophy, Target, Users, TrendingUp, Loader2 } from "lucide-react"
+import { Trophy, Target, Users, TrendingUp, Loader2, Crown } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
-import { useQuery, useDocument } from "@/hooks/useFirestore"
-import { Ranking, UserStats } from "@/lib/types"
+import { useCollection, useDocument } from "@/hooks/useFirestore"
+import { User, UserStats } from "@/lib/types"
+
+// Rank by points desc, tiebreak wins desc, then fewer games played first
+const rankUsers = (players: User[]) =>
+  [...players].sort(
+    (a, b) =>
+      (b.points || 0) - (a.points || 0) ||
+      (b.wins || 0) - (a.wins || 0) ||
+      (a.gamesPlayed || 0) - (b.gamesPlayed || 0)
+  )
+
+const getInitials = (player: User) =>
+  (player.displayName || `${player.firstName || ""} ${player.lastName || ""}`)
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((n) => n[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase() || "?"
+
+// Medal colors for the top 3 podium
+const medalStyles: Record<number, { medal: string; border: string }> = {
+  1: { medal: "bg-yellow-500", border: "border-yellow-400" },
+  2: { medal: "bg-gray-400", border: "border-gray-300" },
+  3: { medal: "bg-amber-600", border: "border-amber-500" },
+}
 
 export default function RankingsScreen() {
   const { user } = useAuth()
   const [selectedSport, setSelectedSport] = useState("Futebol")
+  const [rankingSport, setRankingSport] = useState("todos")
 
   // Fetch user's stats
   const { data: userStats, loading: statsLoading } = useDocument<UserStats>(
@@ -21,123 +48,52 @@ export default function RankingsScreen() {
     user?.id || null
   )
 
-  // Fetch rankings for selected sport
-  const { data: rankings, loading: rankingsLoading } = useQuery<Ranking>(
-    "rankings",
-    [{ field: "sport", operator: "==", value: selectedSport }],
-    { enabled: true, realtime: true }
+  // Live leaderboard: all users, ranked client-side (some docs may lack fields,
+  // so we avoid Firestore orderBy and sort locally)
+  const { data: allUsers, loading: rankingsLoading } = useCollection<User>("users", {
+    realtime: true,
+  })
+
+  // Only users with public profiles appear in rankings
+  const visibleUsers = useMemo(
+    () => allUsers.filter((u) => u.privacy?.profileVisible !== false),
+    [allUsers]
   )
 
-  // Sort rankings by rank
-  const sortedRankings = useMemo(() => {
-    if (!rankings) return []
-    return [...rankings].sort((a, b) => a.rank - b.rank)
-  }, [rankings])
+  // Leaderboard for the selected sport filter
+  const leaderboard = useMemo(() => {
+    const filtered =
+      rankingSport === "todos"
+        ? visibleUsers
+        : visibleUsers.filter((u) =>
+            u.sports?.some((s) => s.toLowerCase() === rankingSport.toLowerCase())
+          )
+    return rankUsers(filtered)
+  }, [visibleUsers, rankingSport])
 
-  // Calculate user rank info
+  // Global rank info (used in "As Minhas Estatísticas")
   const userRankInfo = useMemo(() => {
-    if (!rankings || !user?.id) return { rank: "-", totalPlayers: 0 }
-    const userRanking = rankings.find(r => r.userId === user.id)
+    if (!user?.id) return { rank: "-" as number | string, totalPlayers: 0 }
+    const board = rankUsers(visibleUsers)
+    const idx = board.findIndex((u) => u.id === user.id)
     return {
-      rank: userRanking?.rank || "-",
-      totalPlayers: rankings.length
+      rank: idx >= 0 ? idx + 1 : ("-" as number | string),
+      totalPlayers: board.length,
     }
-  }, [rankings, user?.id])
+  }, [visibleUsers, user?.id])
+
+  // User's position within the currently filtered leaderboard
+  const myLeaderboardRank = useMemo(() => {
+    if (!user?.id) return null
+    const idx = leaderboard.findIndex((u) => u.id === user.id)
+    return idx >= 0 ? idx + 1 : null
+  }, [leaderboard, user?.id])
 
   // Get stats for current sport
   const currentSportStats = useMemo(() => {
     if (!userStats?.sportStats) return null
-    return userStats.sportStats[selectedSport.toLowerCase()] || null
+    return userStats.sportStats[selectedSport] || userStats.sportStats[selectedSport.toLowerCase()] || null
   }, [userStats, selectedSport])
-
-  const getSportIcon = (sport: string) => {
-    switch (sport.toLowerCase()) {
-      case "futebol":
-        return "⚽"
-      case "ténis":
-      case "tenis":
-        return "🎾"
-      case "basquetebol":
-        return "🏀"
-      case "padel":
-        return "🏓"
-      case "voleibol":
-        return "🏐"
-      case "futsal":
-        return "⚽"
-      default:
-        return "⚽"
-    }
-  }
-
-  const getSportStats = (player: Ranking, sport: string) => {
-    const sportLower = sport.toLowerCase()
-    switch (sportLower) {
-      case "futebol":
-      case "futsal":
-        return (
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>
-              {player.goals || 0} golos • {player.assists || 0} assistências
-            </div>
-            <div>
-              {player.wins}V - {player.losses}D
-            </div>
-          </div>
-        )
-      case "ténis":
-      case "tenis":
-        return (
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>
-              {player.aces || 0} aces • {player.points || 0} pontos
-            </div>
-            <div>
-              {player.wins}V - {player.losses}D
-            </div>
-          </div>
-        )
-      case "basquetebol":
-        return (
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>
-              {player.points || 0} pontos • {player.assists || 0} assistências
-            </div>
-            <div>
-              {player.wins}V - {player.losses}D
-            </div>
-          </div>
-        )
-      case "padel":
-        return (
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>
-              {player.winners || 0} winners • {player.points || 0} pontos
-            </div>
-            <div>
-              {player.wins}V - {player.losses}D
-            </div>
-          </div>
-        )
-      case "voleibol":
-        return (
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>
-              {player.points || 0} pontos • {player.blocks || 0} bloqueios
-            </div>
-            <div>
-              {player.wins}V - {player.losses}D
-            </div>
-          </div>
-        )
-      default:
-        return (
-          <div className="text-xs text-gray-600">
-            {player.wins}V - {player.losses}D
-          </div>
-        )
-    }
-  }
 
   if (statsLoading) {
     return (
@@ -164,6 +120,29 @@ export default function RankingsScreen() {
         </TabsList>
 
         <TabsContent value="my-stats" className="space-y-6">
+          {/* Sport Selector */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Selecionar Desporto</CardTitle>
+              <CardDescription>Escolhe o desporto para veres as tuas estatísticas</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Select value={selectedSport} onValueChange={setSelectedSport}>
+                <SelectTrigger className="w-full md:w-64">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Futebol">⚽ Futebol</SelectItem>
+                  <SelectItem value="Ténis">🎾 Ténis</SelectItem>
+                  <SelectItem value="Basquetebol">🏀 Basquetebol</SelectItem>
+                  <SelectItem value="Padel">🏓 Padel</SelectItem>
+                  <SelectItem value="Voleibol">🏐 Voleibol</SelectItem>
+                  <SelectItem value="Futsal">⚽ Futsal</SelectItem>
+                </SelectContent>
+              </Select>
+            </CardContent>
+          </Card>
+
           {/* Level Card */}
           <Card className="bg-gradient-to-r from-green-500 to-green-600 text-white">
             <CardHeader>
@@ -176,7 +155,7 @@ export default function RankingsScreen() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-4xl font-bold">Nível {userStats?.level || user?.level || 1}</div>
-                  <p className="text-green-100">Faceit Level System</p>
+                  <p className="text-green-100">Sistema de Níveis JOGA</p>
                 </div>
                 <div className="text-right">
                   <div className="text-2xl font-bold">#{userRankInfo.rank}</div>
@@ -279,18 +258,19 @@ export default function RankingsScreen() {
         </TabsContent>
 
         <TabsContent value="rankings" className="space-y-6">
-          {/* Sport Selector */}
+          {/* Sport Filter */}
           <Card>
             <CardHeader>
               <CardTitle>Selecionar Desporto</CardTitle>
-              <CardDescription>Escolhe o desporto para ver os melhores jogadores</CardDescription>
+              <CardDescription>Filtra o ranking por desporto</CardDescription>
             </CardHeader>
             <CardContent>
-              <Select value={selectedSport} onValueChange={setSelectedSport}>
+              <Select value={rankingSport} onValueChange={setRankingSport}>
                 <SelectTrigger className="w-full md:w-64">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="todos">🏆 Todos os desportos</SelectItem>
                   <SelectItem value="Futebol">⚽ Futebol</SelectItem>
                   <SelectItem value="Ténis">🎾 Ténis</SelectItem>
                   <SelectItem value="Basquetebol">🏀 Basquetebol</SelectItem>
@@ -302,81 +282,176 @@ export default function RankingsScreen() {
             </CardContent>
           </Card>
 
-          {/* Rankings List */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                {getSportIcon(selectedSport)} Top Jogadores - {selectedSport}
-              </CardTitle>
-              <CardDescription>Os melhores jogadores de {selectedSport} da plataforma JOGA!</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {rankingsLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="w-6 h-6 animate-spin text-green-600" />
-                </div>
-              ) : sortedRankings.length === 0 ? (
-                <div className="text-center py-12">
+          {rankingsLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-6 h-6 animate-spin text-green-600" />
+            </div>
+          ) : leaderboard.length === 0 ? (
+            <Card>
+              <CardContent className="py-12">
+                <div className="text-center">
                   <Trophy className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                  <p className="text-gray-600">Ainda não há rankings para {selectedSport}</p>
-                  <p className="text-sm text-gray-500">Joga partidas ranqueadas para aparecer aqui!</p>
+                  <p className="text-gray-600">
+                    {rankingSport === "todos"
+                      ? "Ainda não há jogadores no ranking"
+                      : `Ainda não há jogadores de ${rankingSport} no ranking`}
+                  </p>
+                  <p className="text-sm text-gray-500">Joga partidas para apareceres aqui!</p>
                 </div>
-              ) : (
-                <div className="space-y-4">
-                  {sortedRankings.map((player) => (
-                    <div
-                      key={player.id}
-                      className={`flex items-center justify-between p-4 rounded-lg border hover:shadow-md transition-shadow ${
-                        player.userId === user?.id ? "bg-green-50 border-green-200" : ""
-                      }`}
-                    >
-                      <div className="flex items-center gap-4">
-                        <div
-                          className={`flex items-center justify-center w-10 h-10 rounded-full font-bold text-white ${
-                            player.rank === 1
-                              ? "bg-yellow-500"
-                              : player.rank === 2
-                                ? "bg-gray-400"
-                                : player.rank === 3
-                                  ? "bg-amber-600"
-                                  : "bg-gray-300 text-gray-700"
-                          }`}
-                        >
-                          {player.rank}
-                        </div>
-                        <Avatar className="w-12 h-12">
-                          <AvatarImage src={player.userPhoto} />
-                          <AvatarFallback>
-                            {player.userName
-                              .split(" ")
-                              .map((n) => n[0])
-                              .join("")}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div>
-                          <p className="font-medium text-lg">
-                            {player.userName}
-                            {player.userId === user?.id && (
-                              <Badge variant="outline" className="ml-2 text-green-600 border-green-600">
-                                Tu
-                              </Badge>
-                            )}
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* Podium - top 3 */}
+              <div className="grid grid-cols-3 gap-3 items-end">
+                {[
+                  { player: leaderboard[1], rank: 2 },
+                  { player: leaderboard[0], rank: 1 },
+                  { player: leaderboard[2], rank: 3 },
+                ].map(({ player, rank }) =>
+                  player ? (
+                    <div key={player.id} className={rank === 1 ? "pb-4" : ""}>
+                      <Card
+                        className={`text-center border-2 ${medalStyles[rank].border} ${
+                          player.id === user?.id ? "ring-2 ring-green-600" : ""
+                        }`}
+                      >
+                        <CardContent className="pt-6 pb-4 px-2 flex flex-col items-center gap-2">
+                          <div
+                            className={`flex items-center justify-center w-8 h-8 rounded-full text-white font-bold ${medalStyles[rank].medal}`}
+                          >
+                            {rank}
+                          </div>
+                          <Avatar className={rank === 1 ? "w-16 h-16" : "w-12 h-12"}>
+                            <AvatarImage src={player.photoURL} />
+                            <AvatarFallback>{getInitials(player)}</AvatarFallback>
+                          </Avatar>
+                          <p className="font-semibold text-sm truncate w-full">
+                            {player.displayName}
                           </p>
-                          {getSportStats(player, selectedSport)}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <Badge variant="outline" className="mb-2">
-                          Nível {player.level}
-                        </Badge>
-                        <p className="text-lg font-bold text-green-600">{player.rating} pts</p>
+                          <Badge variant="outline">Nível {player.level || 1}</Badge>
+                          <p className="text-lg font-bold text-green-600">
+                            {player.points || 0} pts
+                          </p>
+                          <p className="text-xs text-gray-600">
+                            {player.wins || 0}V-{player.losses || 0}D-{player.draws || 0}E
+                          </p>
+                          {(player.mvps || 0) > 0 && (
+                            <p className="flex items-center gap-1 text-xs text-yellow-600">
+                              <Crown className="w-3 h-3" /> {player.mvps} MVP
+                            </p>
+                          )}
+                        </CardContent>
+                      </Card>
+                    </div>
+                  ) : (
+                    <div key={`empty-${rank}`} />
+                  )
+                )}
+              </div>
+
+              {/* Current user position summary */}
+              {user && (
+                <Card className="sticky top-2 z-10 border-green-600 bg-green-50">
+                  <CardContent className="py-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Avatar className="w-10 h-10">
+                        <AvatarImage src={user.photoURL} />
+                        <AvatarFallback>{getInitials(user)}</AvatarFallback>
+                      </Avatar>
+                      <div>
+                        <p className="font-medium text-green-800">A tua posição</p>
+                        <p className="text-xs text-green-700">
+                          {myLeaderboardRank
+                            ? `#${myLeaderboardRank} de ${leaderboard.length} jogadores`
+                            : "Ainda não estás neste ranking"}
+                        </p>
                       </div>
                     </div>
-                  ))}
-                </div>
+                    <div className="text-right">
+                      <p className="text-2xl font-bold text-green-600">{user.points || 0}</p>
+                      <p className="text-xs text-green-700">pontos</p>
+                    </div>
+                  </CardContent>
+                </Card>
               )}
-            </CardContent>
-          </Card>
+
+              {/* Rest of the leaderboard */}
+              {leaderboard.length > 3 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Trophy className="w-5 h-5 text-green-600" />
+                      Classificação
+                    </CardTitle>
+                    <CardDescription>
+                      Os melhores jogadores da plataforma JOGA, em tempo real
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-3">
+                      {leaderboard.slice(3).map((player, index) => {
+                        const rank = index + 4
+                        const isMe = player.id === user?.id
+                        return (
+                          <div
+                            key={player.id}
+                            className={`flex items-center justify-between p-3 rounded-lg border hover:shadow-md transition-shadow ${
+                              isMe ? "border-green-600 bg-green-50" : ""
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="flex items-center justify-center w-8 h-8 rounded-full bg-gray-100 text-gray-700 font-bold text-sm shrink-0">
+                                {rank}
+                              </div>
+                              <Avatar className="w-10 h-10 shrink-0">
+                                <AvatarImage src={player.photoURL} />
+                                <AvatarFallback>{getInitials(player)}</AvatarFallback>
+                              </Avatar>
+                              <div className="min-w-0">
+                                <p className="font-medium truncate">
+                                  {player.displayName}
+                                  {isMe && (
+                                    <Badge
+                                      variant="outline"
+                                      className="ml-2 text-green-600 border-green-600"
+                                    >
+                                      Tu
+                                    </Badge>
+                                  )}
+                                </p>
+                                <div className="flex items-center gap-2 text-xs text-gray-600">
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[10px] px-1.5 py-0"
+                                  >
+                                    Nível {player.level || 1}
+                                  </Badge>
+                                  <span>
+                                    {player.wins || 0}V-{player.losses || 0}D-
+                                    {player.draws || 0}E
+                                  </span>
+                                  {(player.mvps || 0) > 0 && (
+                                    <span className="flex items-center gap-0.5 text-yellow-600">
+                                      <Crown className="w-3 h-3" />
+                                      {player.mvps}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <p className="text-lg font-bold text-green-600 shrink-0">
+                              {player.points || 0} pts
+                            </p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </>
+          )}
         </TabsContent>
       </Tabs>
     </div>

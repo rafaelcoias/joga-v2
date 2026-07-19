@@ -13,6 +13,7 @@ import {
 } from "firebase/auth";
 import { auth } from "@/lib/firebase/config";
 import { fetchDocument, handleSetDoc, handleEditDoc } from "@/lib/firebase/server";
+import { sendWelcomeEmail } from "@/lib/email/emailService";
 import { User } from "@/lib/types";
 import { useToast } from "@/hooks/use-toast";
 
@@ -144,6 +145,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const createdUser = await fetchUserData(userCredential.user.uid);
       setUser(createdUser);
+
+      // Courtesy welcome email — fire-and-forget
+      sendWelcomeEmail(email, userData.firstName || "atleta");
 
       toast({
         title: "Conta criada com sucesso!",

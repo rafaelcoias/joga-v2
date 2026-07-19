@@ -1,12 +1,12 @@
 "use client"
 
 import { useState, useMemo } from "react"
-import { useParams, useRouter } from "next/navigation"
+import { useParams } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -22,7 +22,6 @@ import {
 } from "@/components/ui/dialog"
 import {
   MapPin,
-  Clock,
   Users,
   Star,
   Euro,
@@ -32,19 +31,32 @@ import {
   Edit2,
   Trophy,
   UserPlus,
+  UserMinus,
   X,
   Plus,
   Zap,
+  Crown,
 } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
-import { useDocument, useCRUD } from "@/hooks/useFirestore"
+import { useDocument } from "@/hooks/useFirestore"
+import {
+  joinMatch,
+  leaveMatch,
+  addGuestToMatch,
+  removeParticipantAt,
+  completeMatchWithStats,
+} from "@/lib/firebase/matchService"
 import { Match } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import DashboardLayout from "@/app/components/dashboard-layout"
 
+interface RosterEntry {
+  id: string // user id, "" for guests added by name
+  name: string
+}
+
 export default function GameDetailPage() {
   const params = useParams()
-  const router = useRouter()
   const { user } = useAuth()
   const { toast } = useToast()
   const gameId = params.id as string
@@ -52,149 +64,128 @@ export default function GameDetailPage() {
   // Fetch game data
   const { data: game, loading, error, refresh } = useDocument<Match>("matches", gameId)
 
-  // CRUD operations
-  const { update: updateMatch, loading: updateLoading } = useCRUD<Match>("matches")
-
-  // Edit dialogs state
+  // Dialogs state
   const [editResultDialogOpen, setEditResultDialogOpen] = useState(false)
   const [addParticipantDialogOpen, setAddParticipantDialogOpen] = useState(false)
   const [joiningMatch, setJoiningMatch] = useState(false)
+  const [leavingMatch, setLeavingMatch] = useState(false)
+  const [savingResult, setSavingResult] = useState(false)
+  const [addingParticipant, setAddingParticipant] = useState(false)
 
-  // Edit form state
+  // Result form state
   const [editForm, setEditForm] = useState({
     hasHappened: false,
     resultScore: "",
     resultWinner: "" as "team1" | "team2" | "draw" | "",
     resultNotes: "",
+    mvpIndex: -1,
   })
+  const [teamAssignments, setTeamAssignments] = useState<Record<string, "team1" | "team2">>({})
 
   // New participant form
   const [newParticipantName, setNewParticipantName] = useState("")
 
-  // Helper to calculate price per person
+  // The roster arrays are index-aligned: participantNames[i] belongs to
+  // participants[i], where "" marks a guest without an account.
+  const roster: RosterEntry[] = useMemo(() => {
+    if (!game) return []
+    const size = Math.max(game.participants?.length ?? 0, game.participantNames?.length ?? 0)
+    const entries: RosterEntry[] = []
+    for (let i = 0; i < size; i++) {
+      entries.push({
+        id: game.participants?.[i] ?? "",
+        name: game.participantNames?.[i] ?? game.participants?.[i] ?? "Jogador",
+      })
+    }
+    // Legacy matches may not have the organizer in the roster
+    if (entries.length === 0 && game.organizer) {
+      entries.push({ id: game.organizerId, name: game.organizer })
+    }
+    return entries
+  }, [game])
+
+  const isOrganizer = !!user?.id && game?.organizerId === user.id
+  const hasJoined = !!user?.id && roster.some((p) => p.id === user.id)
+  const canEdit = !!user?.id && !!game && (isOrganizer || (!!game.hasHappened && hasJoined))
+  const registeredPlayers = roster.length
+
   const calculatePricePerPerson = (totalPrice: number, totalPlayers: number): string => {
     if (totalPlayers <= 0) return "0.00"
     return (totalPrice / totalPlayers).toFixed(2)
   }
 
-  // Check if current user is organizer
-  const isOrganizer = useMemo(() => {
-    return user?.id && game?.organizerId === user.id
-  }, [user?.id, game?.organizerId])
-
-  // Check if current user can edit (organizer or participant after game)
-  const canEdit = useMemo(() => {
-    if (!user?.id || !game) return false
-    return isOrganizer || (game.hasHappened && game.participants?.includes(user.id))
-  }, [user?.id, game, isOrganizer])
-
-  // Check if user already joined
-  const hasJoined = useMemo(() => {
-    return user?.id && game?.participants?.includes(user.id)
-  }, [user?.id, game?.participants])
-
-  // Initialize edit form when opening dialog
   const handleOpenEditDialog = () => {
-    if (game) {
-      setEditForm({
-        hasHappened: game.hasHappened || false,
-        resultScore: game.result?.score || "",
-        resultWinner: game.result?.winner || "",
-        resultNotes: game.result?.notes || "",
-      })
-      setEditResultDialogOpen(true)
-    }
+    if (!game) return
+    const mvpIndex = roster.findIndex(
+      (p) => (game.result?.mvpId && p.id === game.result.mvpId) || (game.result?.mvp && p.name === game.result.mvp)
+    )
+    setEditForm({
+      hasHappened: game.hasHappened || false,
+      resultScore: game.result?.score || "",
+      resultWinner: game.result?.winner || "",
+      resultNotes: game.result?.notes || "",
+      mvpIndex,
+    })
+    setTeamAssignments(game.teams || {})
+    setEditResultDialogOpen(true)
   }
 
-  // Save result
   const handleSaveResult = async () => {
     if (!game?.id) return
 
+    setSavingResult(true)
     try {
-      await updateMatch(game.id, {
-        hasHappened: editForm.hasHappened,
-        ...(editForm.hasHappened
-          ? {
-              result: {
-                score: editForm.resultScore,
-                winner: editForm.resultWinner || undefined,
-                notes: editForm.resultNotes,
-              },
-              status: "completed" as const,
-            }
-          : {
-              result: undefined,
-            }),
-      })
-
-      toast({
-        title: "Resultado guardado",
-        description: "O resultado do jogo foi atualizado com sucesso.",
-      })
+      if (editForm.hasHappened) {
+        const mvpEntry = editForm.mvpIndex >= 0 ? roster[editForm.mvpIndex] : undefined
+        await completeMatchWithStats(game.id, {
+          score: editForm.resultScore,
+          winner: editForm.resultWinner || "draw",
+          notes: editForm.resultNotes,
+          mvp: mvpEntry?.name,
+          mvpId: mvpEntry?.id,
+          teams: teamAssignments,
+        })
+        toast({
+          title: "Resultado guardado",
+          description: game.statsApplied
+            ? "O resultado do jogo foi atualizado."
+            : "Resultado guardado e estatísticas dos jogadores atualizadas!",
+        })
+      } else {
+        // Nothing to complete — the game simply hasn't happened yet.
+        setEditResultDialogOpen(false)
+        setSavingResult(false)
+        return
+      }
 
       setEditResultDialogOpen(false)
       refresh()
-    } catch {
+    } catch (err) {
       toast({
         title: "Erro",
-        description: "Nao foi possivel guardar o resultado.",
+        description: err instanceof Error ? err.message : "Não foi possível guardar o resultado.",
         variant: "destructive",
       })
+    } finally {
+      setSavingResult(false)
     }
   }
 
-  // Join match
   const handleJoinMatch = async () => {
-    if (!user?.id || !game) return
+    if (!user || !game?.id) return
 
     setJoiningMatch(true)
-
     try {
-      // Check if already joined
-      if (game.participants?.includes(user.id)) {
-        toast({
-          title: "Ja inscrito",
-          description: "Ja estas inscrito neste jogo.",
-        })
-        return
-      }
-
-      // Check if match is full
-      const currentPlayers = game.participants?.length || 0
-      if (currentPlayers >= game.totalPlayers) {
-        toast({
-          title: "Jogo cheio",
-          description: "Este jogo ja esta completo.",
-          variant: "destructive",
-        })
-        return
-      }
-
-      // Add user to participants
-      const newParticipants = [...(game.participants || []), user.id]
-      const newParticipantNames = [
-        ...(game.participantNames || []),
-        user.displayName || `${user.firstName} ${user.lastName}`,
-      ]
-      const newPlayersNeeded = game.playersNeeded - 1
-
-      await updateMatch(game.id, {
-        participants: newParticipants,
-        participantNames: newParticipantNames,
-        playersNeeded: newPlayersNeeded,
-        status: newPlayersNeeded <= 0 ? "full" : "open",
-      })
-
+      await joinMatch(game.id, user)
       toast({
-        title: "Inscricao confirmada!",
+        title: "Inscrição confirmada!",
         description: "Juntaste-te ao jogo com sucesso.",
       })
-
       refresh()
-    } catch {
+    } catch (err) {
       toast({
         title: "Erro",
-        description: "Nao foi possivel inscrever-te no jogo.",
+        description: err instanceof Error ? err.message : "Não foi possível inscrever-te no jogo.",
         variant: "destructive",
       })
     } finally {
@@ -202,82 +193,66 @@ export default function GameDetailPage() {
     }
   }
 
-  // Add participant (by organizer)
+  const handleLeaveMatch = async () => {
+    if (!user?.id || !game?.id) return
+
+    setLeavingMatch(true)
+    try {
+      await leaveMatch(game.id, user.id)
+      toast({
+        title: "Saíste do jogo",
+        description: "A tua vaga foi libertada.",
+      })
+      refresh()
+    } catch (err) {
+      toast({
+        title: "Erro",
+        description: err instanceof Error ? err.message : "Não foi possível sair do jogo.",
+        variant: "destructive",
+      })
+    } finally {
+      setLeavingMatch(false)
+    }
+  }
+
   const handleAddParticipant = async () => {
     if (!game?.id || !newParticipantName.trim()) return
 
+    setAddingParticipant(true)
     try {
-      // Ensure organizer is always first in the list
-      // If participantNames is empty/undefined, start with organizer
-      let existingNames = game.participantNames || []
-      if (existingNames.length === 0 && game.organizer) {
-        existingNames = [game.organizer]
-      }
-
-      // Add new participant at the end (never at index 0)
-      const newParticipantNames = [...existingNames, newParticipantName.trim()]
-      const newPlayersNeeded = Math.max(0, game.playersNeeded - 1)
-
-      await updateMatch(game.id, {
-        participantNames: newParticipantNames,
-        playersNeeded: newPlayersNeeded,
-        status: newPlayersNeeded <= 0 ? "full" : "open",
-      })
-
+      await addGuestToMatch(game.id, newParticipantName)
       toast({
         title: "Participante adicionado",
         description: `${newParticipantName} foi adicionado ao jogo.`,
       })
-
       setNewParticipantName("")
       setAddParticipantDialogOpen(false)
       refresh()
-    } catch {
+    } catch (err) {
       toast({
         title: "Erro",
-        description: "Nao foi possivel adicionar o participante.",
+        description: err instanceof Error ? err.message : "Não foi possível adicionar o participante.",
         variant: "destructive",
       })
+    } finally {
+      setAddingParticipant(false)
     }
   }
 
-  // Remove participant (by organizer)
   const handleRemoveParticipant = async (index: number) => {
     if (!game?.id || !isOrganizer) return
 
-    // Don't remove the organizer (first participant)
-    if (index === 0) {
-      toast({
-        title: "Erro",
-        description: "Nao podes remover o organizador do jogo.",
-        variant: "destructive",
-      })
-      return
-    }
-
     try {
-      const newParticipantNames = game.participantNames?.filter((_, i) => i !== index) || []
-      // Only remove from participants array if there's a matching entry
-      const newParticipants = game.participants?.filter((_, i) => i !== index) || []
-      const newPlayersNeeded = game.playersNeeded + 1
-
-      await updateMatch(game.id, {
-        participants: newParticipants,
-        participantNames: newParticipantNames,
-        playersNeeded: newPlayersNeeded,
-        status: "open",
-      })
-
+      await removeParticipantAt(game.id, index)
       toast({
         title: "Participante removido",
         description: "O participante foi removido do jogo.",
       })
-
       refresh()
-    } catch {
+    } catch (err) {
       toast({
         title: "Erro",
-        description: "Nao foi possivel remover o participante.",
+        description: err instanceof Error ? err.message : "Não foi possível remover o participante.",
         variant: "destructive",
       })
     }
@@ -302,7 +277,7 @@ export default function GameDetailPage() {
         <div className="p-6 max-w-4xl mx-auto">
           <Card className="bg-red-50 border-red-200">
             <CardContent className="p-6 text-center">
-              <p className="text-red-600 mb-4">Erro ao carregar o jogo ou jogo nao encontrado.</p>
+              <p className="text-red-600 mb-4">Erro ao carregar o jogo ou jogo não encontrado.</p>
               <Link href="/app">
                 <Button variant="outline">
                   <ArrowLeft className="w-4 h-4 mr-2" />
@@ -317,32 +292,7 @@ export default function GameDetailPage() {
   }
 
   const pricePerPerson = calculatePricePerPerson(game.totalPrice || 0, game.totalPlayers)
-
-  // Ensure participants list always has the organizer first
-  // This handles edge cases where participantNames might be empty or missing the organizer
-  const displayParticipants = useMemo(() => {
-    const names = game.participantNames || []
-    // If no participants but we have an organizer, add them
-    if (names.length === 0 && game.organizer) {
-      return [game.organizer]
-    }
-    // If first participant isn't the organizer, ensure organizer is first
-    if (names.length > 0 && names[0] !== game.organizer && game.organizer) {
-      // Check if organizer is already in the list
-      const organizerIndex = names.indexOf(game.organizer)
-      if (organizerIndex === -1) {
-        // Organizer not in list, add them first
-        return [game.organizer, ...names]
-      } else {
-        // Organizer in list but not first, move them
-        const reordered = [game.organizer, ...names.filter((_, i) => i !== organizerIndex)]
-        return reordered
-      }
-    }
-    return names
-  }, [game.participantNames, game.organizer])
-
-  const registeredPlayers = displayParticipants.length || game.participants?.length || 0
+  const registeredRoster = roster.filter((p) => p.id !== "")
 
   return (
     <DashboardLayout>
@@ -380,7 +330,7 @@ export default function GameDetailPage() {
             {game.hasHappened ? (
               <Badge className="bg-blue-100 text-blue-800 text-lg px-4 py-2">
                 <Trophy className="w-5 h-5 mr-2" />
-                Concluido
+                Concluído
               </Badge>
             ) : game.status === "full" ? (
               <Badge className="bg-orange-100 text-orange-800 text-lg px-4 py-2">Lotado</Badge>
@@ -396,7 +346,7 @@ export default function GameDetailPage() {
       {/* Main Info Card */}
       <Card className="mb-6">
         <CardHeader>
-          <CardTitle>Informacoes do Jogo</CardTitle>
+          <CardTitle>Informações do Jogo</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -413,7 +363,7 @@ export default function GameDetailPage() {
                     day: "numeric",
                   })}
                 </p>
-                <p className="text-gray-600">as {game.time}</p>
+                <p className="text-gray-600">às {game.time}</p>
               </div>
             </div>
 
@@ -433,10 +383,10 @@ export default function GameDetailPage() {
             <div className="flex items-start gap-3">
               <Star className="w-5 h-5 text-gray-500 mt-1" />
               <div>
-                <p className="font-medium">Nivel</p>
+                <p className="font-medium">Nível</p>
                 <p className="text-gray-600">{game.level}</p>
                 {game.mode === "ranked" && game.minLevel && (
-                  <p className="text-sm text-gray-500">Nivel minimo: {game.minLevel}</p>
+                  <p className="text-sm text-gray-500">Nível mínimo: {game.minLevel}</p>
                 )}
               </div>
             </div>
@@ -459,7 +409,7 @@ export default function GameDetailPage() {
             <div className="flex items-start gap-3">
               <Euro className="w-5 h-5 text-gray-500 mt-1" />
               <div>
-                <p className="font-medium">Preco</p>
+                <p className="font-medium">Preço</p>
                 <p className="text-green-600 font-semibold text-lg">{pricePerPerson}€ / pessoa</p>
                 <p className="text-sm text-gray-500">Total: {game.totalPrice}€</p>
               </div>
@@ -503,9 +453,33 @@ export default function GameDetailPage() {
               </Button>
               {game.mode === "ranked" && (user?.level ?? 0) < (game.minLevel ?? 0) && (
                 <p className="text-sm text-red-500 mt-2 text-center">
-                  Precisas de nivel {game.minLevel} para participar neste jogo Arranca.
+                  Precisas de nível {game.minLevel} para participar neste jogo Arranca.
                 </p>
               )}
+            </div>
+          )}
+
+          {/* Leave button (participants who are not the organizer) */}
+          {hasJoined && !isOrganizer && !game.hasHappened && game.status !== "cancelled" && (
+            <div className="mt-6 pt-6 border-t">
+              <Button
+                variant="outline"
+                className="w-full text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                onClick={handleLeaveMatch}
+                disabled={leavingMatch}
+              >
+                {leavingMatch ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    A sair...
+                  </>
+                ) : (
+                  <>
+                    <UserMinus className="w-5 h-5 mr-2" />
+                    Sair deste jogo
+                  </>
+                )}
+              </Button>
             </div>
           )}
         </CardContent>
@@ -515,7 +489,7 @@ export default function GameDetailPage() {
       <Card className="mb-6">
         <CardHeader>
           <div className="flex justify-between items-center">
-            <CardTitle>Participantes ({displayParticipants.length}/{game.totalPlayers})</CardTitle>
+            <CardTitle>Participantes ({registeredPlayers}/{game.totalPlayers})</CardTitle>
             {isOrganizer && !game.hasHappened && game.playersNeeded > 0 && (
               <Button variant="outline" size="sm" onClick={() => setAddParticipantDialogOpen(true)}>
                 <Plus className="w-4 h-4 mr-1" />
@@ -526,49 +500,74 @@ export default function GameDetailPage() {
           <CardDescription>Lista de jogadores inscritos neste jogo</CardDescription>
         </CardHeader>
         <CardContent>
-          {displayParticipants.length > 0 ? (
+          {roster.length > 0 ? (
             <div className="space-y-3">
-              {displayParticipants.map((name, index) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                >
-                  <div className="flex items-center gap-3">
-                    <Avatar>
-                      <AvatarImage src="/placeholder.svg?height=40&width=40" />
-                      <AvatarFallback>
-                        {name
-                          .split(" ")
-                          .map((n) => n[0])
-                          .join("")
-                          .toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div>
-                      <p className="font-medium">{name}</p>
-                      {index === 0 && (
-                        <Badge variant="outline" className="text-xs">
-                          Organizador
-                        </Badge>
-                      )}
+              {roster.map((participant, index) => {
+                const isEntryOrganizer =
+                  participant.id === game.organizerId ||
+                  (participant.id === "" && index === 0 && participant.name === game.organizer)
+                const isMvp =
+                  !!game.result?.mvp &&
+                  (game.result.mvpId
+                    ? participant.id === game.result.mvpId && participant.id !== ""
+                    : participant.name === game.result.mvp)
+                return (
+                  <div
+                    key={`${participant.id}-${index}`}
+                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Avatar>
+                        <AvatarFallback>
+                          {participant.name
+                            .split(" ")
+                            .map((n) => n[0])
+                            .join("")
+                            .toUpperCase()
+                            .slice(0, 2)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div>
+                        <p className="font-medium flex items-center gap-2">
+                          {participant.name}
+                          {isMvp && (
+                            <Badge className="bg-yellow-100 text-yellow-800 text-xs">
+                              <Crown className="w-3 h-3 mr-1" />
+                              MVP
+                            </Badge>
+                          )}
+                        </p>
+                        <div className="flex gap-1">
+                          {isEntryOrganizer && (
+                            <Badge variant="outline" className="text-xs">
+                              Organizador
+                            </Badge>
+                          )}
+                          {participant.id === "" && !isEntryOrganizer && (
+                            <Badge variant="outline" className="text-xs text-gray-500">
+                              Convidado
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
                     </div>
+                    {isOrganizer && !isEntryOrganizer && !game.hasHappened && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                        onClick={() => handleRemoveParticipant(index)}
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
+                    )}
                   </div>
-                  {isOrganizer && index > 0 && !game.hasHappened && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                      onClick={() => handleRemoveParticipant(index)}
-                    >
-                      <X className="w-4 h-4" />
-                    </Button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <p className="text-gray-500 text-center py-4">
-              Ainda nao ha participantes inscritos.
+              Ainda não há participantes inscritos.
             </p>
           )}
 
@@ -583,12 +582,12 @@ export default function GameDetailPage() {
                   <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
                     <Users className="w-5 h-5" />
                   </div>
-                  <span>Vaga disponivel</span>
+                  <span>Vaga disponível</span>
                 </div>
               ))}
               {game.playersNeeded > 5 && (
                 <p className="text-sm text-gray-500 text-center">
-                  +{game.playersNeeded - 5} vagas disponiveis
+                  +{game.playersNeeded - 5} vagas disponíveis
                 </p>
               )}
             </div>
@@ -642,24 +641,38 @@ export default function GameDetailPage() {
                     </Badge>
                   </div>
                 )}
+                {game.result.mvp && (
+                  <div>
+                    <p className="text-sm text-gray-500 mb-1">MVP do Jogo</p>
+                    <Badge className="bg-yellow-100 text-yellow-800">
+                      <Crown className="w-4 h-4 mr-1" />
+                      {game.result.mvp}
+                    </Badge>
+                  </div>
+                )}
                 {game.result.notes && (
                   <div>
                     <p className="text-sm text-gray-500 mb-1">Notas</p>
                     <p className="text-gray-700">{game.result.notes}</p>
                   </div>
                 )}
+                {game.statsApplied && (
+                  <p className="text-xs text-gray-400">
+                    As estatísticas dos jogadores registados foram atualizadas com este resultado.
+                  </p>
+                )}
               </div>
             ) : game.hasHappened ? (
-              <p className="text-gray-500">O jogo terminou mas ainda nao foi inserido o resultado.</p>
+              <p className="text-gray-500">O jogo terminou mas ainda não foi inserido o resultado.</p>
             ) : (
               <div className="text-center py-4">
                 <p className="text-gray-500 mb-3">
-                  Este jogo ainda nao aconteceu. Marca-o como concluido para inserir o resultado.
+                  Este jogo ainda não aconteceu. Marca-o como concluído para inserir o resultado.
                 </p>
                 {canEdit && (
                   <Button variant="outline" onClick={handleOpenEditDialog}>
                     <Edit2 className="w-4 h-4 mr-1" />
-                    Marcar como concluido
+                    Marcar como concluído
                   </Button>
                 )}
               </div>
@@ -670,11 +683,12 @@ export default function GameDetailPage() {
 
       {/* Edit Result Dialog */}
       <Dialog open={editResultDialogOpen} onOpenChange={setEditResultDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Editar Resultado</DialogTitle>
             <DialogDescription>
-              Marca o jogo como concluido e insere o resultado final.
+              Marca o jogo como concluído e insere o resultado final. As estatísticas dos
+              jogadores registados são atualizadas automaticamente.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -683,14 +697,20 @@ export default function GameDetailPage() {
               <Checkbox
                 id="hasHappened"
                 checked={editForm.hasHappened}
+                disabled={game.statsApplied}
                 onCheckedChange={(checked: boolean | "indeterminate") =>
                   setEditForm({ ...editForm, hasHappened: checked === true })
                 }
               />
               <Label htmlFor="hasHappened" className="font-medium">
-                Este jogo ja aconteceu
+                Este jogo já aconteceu
               </Label>
             </div>
+            {game.statsApplied && (
+              <p className="text-xs text-gray-500">
+                As estatísticas já foram aplicadas — o jogo não pode voltar a &quot;por acontecer&quot;.
+              </p>
+            )}
 
             {/* Conditional Result Fields */}
             {editForm.hasHappened && (
@@ -723,10 +743,78 @@ export default function GameDetailPage() {
                   </Select>
                 </div>
 
+                {/* Team assignment — needed to credit wins/losses per player */}
+                {(editForm.resultWinner === "team1" || editForm.resultWinner === "team2") &&
+                  registeredRoster.length > 0 && (
+                    <div className="space-y-2">
+                      <Label>Equipas</Label>
+                      <p className="text-xs text-gray-500">
+                        Atribui cada jogador registado a uma equipa para contabilizar vitórias e derrotas.
+                      </p>
+                      <div className="space-y-2">
+                        {registeredRoster.map((p) => (
+                          <div key={p.id} className="flex items-center justify-between gap-2">
+                            <span className="text-sm truncate">{p.name}</span>
+                            <div className="flex gap-1">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={teamAssignments[p.id] === "team1" ? "default" : "outline"}
+                                className={teamAssignments[p.id] === "team1" ? "bg-blue-600 hover:bg-blue-700" : ""}
+                                onClick={() =>
+                                  setTeamAssignments({ ...teamAssignments, [p.id]: "team1" })
+                                }
+                              >
+                                Equipa 1
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={teamAssignments[p.id] === "team2" ? "default" : "outline"}
+                                className={teamAssignments[p.id] === "team2" ? "bg-red-600 hover:bg-red-700" : ""}
+                                onClick={() =>
+                                  setTeamAssignments({ ...teamAssignments, [p.id]: "team2" })
+                                }
+                              >
+                                Equipa 2
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                {/* MVP selection */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1">
+                    <Crown className="w-4 h-4 text-yellow-500" />
+                    MVP do Jogo
+                  </Label>
+                  <Select
+                    value={editForm.mvpIndex >= 0 ? String(editForm.mvpIndex) : "none"}
+                    onValueChange={(v) =>
+                      setEditForm({ ...editForm, mvpIndex: v === "none" ? -1 : Number(v) })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Seleciona o melhor jogador" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Sem MVP</SelectItem>
+                      {roster.map((p, i) => (
+                        <SelectItem key={`${p.id}-${i}`} value={String(i)}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div className="space-y-2">
                   <Label>Notas do Jogo</Label>
                   <Textarea
-                    placeholder="Observacoes sobre o jogo..."
+                    placeholder="Observações sobre o jogo..."
                     value={editForm.resultNotes}
                     onChange={(e) => setEditForm({ ...editForm, resultNotes: e.target.value })}
                   />
@@ -741,9 +829,9 @@ export default function GameDetailPage() {
             <Button
               className="bg-green-600 hover:bg-green-700"
               onClick={handleSaveResult}
-              disabled={updateLoading}
+              disabled={savingResult}
             >
-              {updateLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Guardar"}
+              {savingResult ? <Loader2 className="w-4 h-4 animate-spin" /> : "Guardar"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -755,7 +843,7 @@ export default function GameDetailPage() {
           <DialogHeader>
             <DialogTitle>Adicionar Participante</DialogTitle>
             <DialogDescription>
-              Adiciona um jogador que ja confirmou presenca neste jogo.
+              Adiciona um jogador que já confirmou presença neste jogo.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -775,9 +863,9 @@ export default function GameDetailPage() {
             <Button
               className="bg-green-600 hover:bg-green-700"
               onClick={handleAddParticipant}
-              disabled={updateLoading || !newParticipantName.trim()}
+              disabled={addingParticipant || !newParticipantName.trim()}
             >
-              {updateLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Adicionar"}
+              {addingParticipant ? <Loader2 className="w-4 h-4 animate-spin" /> : "Adicionar"}
             </Button>
           </DialogFooter>
         </DialogContent>

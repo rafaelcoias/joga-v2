@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "JOGA! - Login",
-  description: "Entre na sua conta JOGA!",
+  title: "JOGA! - Entrar",
+  description: "Entra na tua conta JOGA! ou cria uma nova.",
 };
 
 export default function AuthLayout({
