@@ -93,6 +93,14 @@ export function sendMatchResultEmail(
   });
 }
 
+export function sendMatchCancelledEmail(
+  to: string | undefined,
+  firstName: string,
+  match: { sport: string; date: string; time: string; location: string }
+): void {
+  dispatch("match-cancelled", [to], { firstName, ...match });
+}
+
 export function sendFriendRequestEmail(
   to: string | undefined,
   receiverName: string,

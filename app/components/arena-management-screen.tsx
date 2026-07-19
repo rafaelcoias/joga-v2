@@ -36,6 +36,7 @@ import { useQuery, useCRUD } from "@/hooks/useFirestore"
 import { Arena, ArenaBooking } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { sendBookingStatusEmail } from "@/lib/email/emailService"
+import { pushNotification } from "@/lib/firebase/notificationService"
 
 const AVAILABLE_SPORTS = ["Futebol", "Ténis", "Basquetebol", "Padel", "Voleibol", "Futsal"]
 const AVAILABLE_FACILITIES = ["Balneários", "Estacionamento", "Iluminação", "Bar/Cafetaria", "Equipamento para alugar", "Wi-Fi"]
@@ -257,6 +258,15 @@ export default function ArenaManagementScreen() {
             price: `€${(booking.totalPrice || 0).toFixed(2)}`,
           },
           status
+        )
+
+        // In-app notification for the player (fire-and-forget)
+        pushNotification(
+          booking.userId,
+          "booking",
+          status === "confirmed" ? "Reserva confirmada" : "Reserva cancelada",
+          `A tua reserva em ${booking.arenaName} a ${booking.date} às ${booking.time} foi ${status === "confirmed" ? "confirmada" : "cancelada"}.`,
+          "/app?screen=bookings"
         )
       }
 

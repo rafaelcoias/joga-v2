@@ -74,6 +74,12 @@ Automations wired in:
 
 Booking integrity: `lib/firebase/bookingService.ts` (`findSlotConflict`) blocks double-booking an arena slot (best-effort pre-check; the organizer confirms bookings and resolves rare races). Bookings made from "As Minhas Reservas" for an arena also create a linked `arenaBookings` entry so the organizer sees them.
 
+Users can switch match and friend emails off in the profile ("Configurações" → notification toggles: `matchInvites` gates join/result/cancellation emails, `newMessages` gates friend emails). Booking emails are transactional and always sent.
+
+## In-app notifications
+
+`lib/firebase/notificationService.ts` + the bell in the dashboard header (`app/components/notification-bell.tsx`, realtime unread badge, mark-as-read, deep links). Notifications fire alongside every email trigger except welcome: match joins, match cancellations, match results, bookings created/confirmed/cancelled, friend requests/acceptances. Match cancellation is a new organizer action on the game page (`cancelMatch` — confirm dialog, notifies and emails all registered players).
+
 ## Security
 
 Rules live in `FIREBASE_SECURITY_RULES.md` and mirror the client flows, including field-restricted cross-user updates for the stats write-back (`onlyStatsFields`) and roster updates by non-organizers (`onlyRosterOrResultFields`).

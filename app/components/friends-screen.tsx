@@ -14,6 +14,7 @@ import { fetchDocument } from "@/lib/firebase/server"
 import { FriendRequest, User } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
 import { sendFriendAcceptedEmail } from "@/lib/email/emailService"
+import { pushNotification } from "@/lib/firebase/notificationService"
 import { formatDate } from "@/lib/utils"
 
 // Helper type for displaying friends
@@ -159,19 +160,31 @@ export default function FriendsScreen() {
       }
       await updateRequest(request.id, updates)
 
-      // Notify the original sender by email (fire-and-forget, never blocks the flow)
+      // Notify the original sender by email (fire-and-forget, never blocks the flow),
+      // unless they turned off email notifications
       fetchDocument("users", request.senderId)
         .then((doc) => {
           const sender = doc as User | null
-          sendFriendAcceptedEmail(
-            sender?.email,
-            sender?.firstName || request.senderName,
-            user?.displayName || ""
-          )
+          if (sender?.preferences?.notifications?.newMessages !== false) {
+            sendFriendAcceptedEmail(
+              sender?.email,
+              sender?.firstName || request.senderName,
+              user?.displayName || ""
+            )
+          }
         })
         .catch((err) => {
           console.warn("Failed to send friend-accepted email:", err)
         })
+
+      // In-app notification (fire-and-forget, always sent)
+      pushNotification(
+        request.senderId,
+        "friend_request",
+        "Pedido aceite",
+        `${user?.displayName || ""} aceitou o teu pedido de amizade.`,
+        "/app?screen=friends"
+      )
 
       toast({
         title: "Pedido aceite",

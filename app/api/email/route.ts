@@ -201,6 +201,22 @@ function buildTemplate(type: string, d: TemplateData): { subject: string; html: 
       };
     }
 
+    case "match-cancelled":
+      return {
+        subject: `Jogo de ${str(d.sport)} cancelado — ${str(d.date)}`,
+        html: layout(
+          "Jogo cancelado ❌",
+          p(`Olá ${esc(d.firstName)}, o organizador cancelou um jogo em que estavas inscrito.`) +
+            detailsTable([
+              ["Desporto", esc(d.sport)],
+              ["Data", esc(formatPtDate(str(d.date)))],
+              ["Hora", esc(d.time)],
+              ["Local", esc(d.location)],
+            ]) +
+            p("Não fiques parado — descobre outros jogos na app! ⚡")
+        ),
+      };
+
     case "friend-request":
       return {
         subject: `${str(d.senderName)} quer ser teu amigo no JOGA!`,

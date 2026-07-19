@@ -209,6 +209,21 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow write: if isAdmin();
     }
+    
+    // Notifications collection (in-app notification bell)
+    match /notifications/{notificationId} {
+      // Users read and manage only their own notifications
+      allow read: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+      
+      // Any authenticated user can create (joins, bookings, friend
+      // requests and results generate notifications for other users)
+      allow create: if isAuthenticated();
+      
+      // Mark-as-read and cleanup by the owner
+      allow update, delete: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+    }
   }
 }
 ```

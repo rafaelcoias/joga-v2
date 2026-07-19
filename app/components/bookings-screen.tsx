@@ -34,6 +34,7 @@ import { useToast } from "@/hooks/use-toast"
 import { findSlotConflict, minutesToTime } from "@/lib/firebase/bookingService"
 import { fetchDocument } from "@/lib/firebase/server"
 import { sendBookingOrganizerEmail, sendBookingUserEmail } from "@/lib/email/emailService"
+import { pushNotification } from "@/lib/firebase/notificationService"
 
 export default function BookingsScreen() {
   const { user } = useAuth()
@@ -191,6 +192,17 @@ export default function BookingsScreen() {
         } catch (err) {
           console.error("Error cancelling linked arena booking:", err)
         }
+
+        // In-app notification for the organizer (fire-and-forget; skipped if unknown)
+        const organizerId = allVenues.find((v) => v.id === booking.venueId)?.organizerId
+        const userName = user?.displayName || `${user?.firstName || ""} ${user?.lastName || ""}`.trim()
+        pushNotification(
+          organizerId,
+          "booking",
+          "Reserva cancelada",
+          `${userName || "Um jogador"} cancelou a reserva de ${booking.venue} a ${booking.date}.`,
+          "/app?screen=arenas"
+        )
       }
 
       toast({
@@ -322,6 +334,15 @@ export default function BookingsScreen() {
               // Email is a courtesy — never block the booking flow
             })
         }
+
+        // In-app notification for the organizer (fire-and-forget)
+        pushNotification(
+          selectedVenue.organizerId,
+          "booking",
+          "Nova reserva",
+          `${userName} reservou ${selectedVenue.name} a ${newBooking.date} às ${newBooking.time}.`,
+          "/app?screen=arenas"
+        )
       }
 
       toast({

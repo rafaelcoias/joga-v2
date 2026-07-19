@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Users, Trophy, Target, Settings, User, Mail, Lock, Bell, Shield, Smartphone, Eye, EyeOff, Loader2, Building2, Crown } from "lucide-react"
+import { Users, Trophy, Target, Settings, User, Mail, Lock, Bell, Shield, Eye, EyeOff, Loader2, Building2, Crown } from "lucide-react"
 import { useAuth } from "@/lib/contexts/AuthContext"
 import { uploadImage } from "@/lib/firebase/server"
 import { useCRUD } from "@/hooks/useFirestore"
@@ -60,12 +60,6 @@ export default function ProfileScreen() {
     onlineStatus: false,
   })
 
-  // App preferences
-  const [appSettings, setAppSettings] = useState({
-    language: "pt",
-    theme: "light",
-  })
-
   // CRUD for user updates
   const { update: updateUser } = useCRUD<UserType>("users")
 
@@ -84,12 +78,6 @@ export default function ProfileScreen() {
       }
       if (user.privacy) {
         setPrivacy(user.privacy)
-      }
-      if (user.preferences) {
-        setAppSettings({
-          language: user.preferences.language || "pt",
-          theme: user.preferences.theme || "light",
-        })
       }
     }
   }, [user])
@@ -165,9 +153,8 @@ export default function ProfileScreen() {
     try {
       await updateUser(user.id, {
         preferences: {
+          ...(user.preferences ?? { language: "pt", theme: "light" }),
           notifications,
-          language: appSettings.language,
-          theme: appSettings.theme,
         },
         privacy,
       })
@@ -611,13 +598,13 @@ export default function ProfileScreen() {
                 <Bell className="w-5 h-5" />
                 Notificações
               </CardTitle>
-              <CardDescription>Escolhe que notificações queres receber</CardDescription>
+              <CardDescription>Escolhe que emails queres receber.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <Label>Convites para Jogos</Label>
-                  <p className="text-sm text-gray-600">Recebe notificações quando te convidarem para jogar</p>
+                  <Label>Jogos</Label>
+                  <p className="text-sm text-gray-600">Emails quando alguém se junta aos teus jogos e quando há resultados</p>
                 </div>
                 <Switch
                   checked={notifications.matchInvites}
@@ -627,8 +614,8 @@ export default function ProfileScreen() {
 
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <Label>Novas Mensagens</Label>
-                  <p className="text-sm text-gray-600">Notificações de mensagens privadas</p>
+                  <Label>Amigos</Label>
+                  <p className="text-sm text-gray-600">Emails de pedidos de amizade e aceitações</p>
                 </div>
                 <Switch
                   checked={notifications.newMessages}
@@ -638,70 +625,26 @@ export default function ProfileScreen() {
 
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <Label>Lembretes de Jogos</Label>
-                  <p className="text-sm text-gray-600">Lembra-te dos jogos marcados</p>
+                  <Label>Lembretes de jogos</Label>
+                  <p className="text-sm text-gray-600">Em breve</p>
                 </div>
                 <Switch
                   checked={notifications.gameReminders}
                   onCheckedChange={(checked) => setNotifications({ ...notifications, gameReminders: checked })}
+                  disabled
                 />
               </div>
 
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <Label>Relatório Semanal</Label>
-                  <p className="text-sm text-gray-600">Resumo semanal das tuas atividades</p>
+                  <Label>Resumo semanal</Label>
+                  <p className="text-sm text-gray-600">Em breve</p>
                 </div>
                 <Switch
                   checked={notifications.weeklyStats}
                   onCheckedChange={(checked) => setNotifications({ ...notifications, weeklyStats: checked })}
+                  disabled
                 />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* App Settings */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Smartphone className="w-5 h-5" />
-                Aplicação
-              </CardTitle>
-              <CardDescription>Configurações gerais da aplicação</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-2">
-                <Label>Idioma</Label>
-                <Select
-                  value={appSettings.language}
-                  onValueChange={(v) => setAppSettings({ ...appSettings, language: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="pt">Português</SelectItem>
-                    <SelectItem value="en">English</SelectItem>
-                    <SelectItem value="es">Español</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Tema</Label>
-                <Select
-                  value={appSettings.theme}
-                  onValueChange={(v) => setAppSettings({ ...appSettings, theme: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="light">Claro</SelectItem>
-                    <SelectItem value="dark">Escuro</SelectItem>
-                    <SelectItem value="system">Sistema</SelectItem>
-                  </SelectContent>
-                </Select>
               </div>
 
               <Button

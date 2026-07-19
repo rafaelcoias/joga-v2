@@ -21,6 +21,17 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog"
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
+import {
   MapPin,
   Users,
   Star,
@@ -45,6 +56,7 @@ import {
   addGuestToMatch,
   removeParticipantAt,
   completeMatchWithStats,
+  cancelMatch,
 } from "@/lib/firebase/matchService"
 import { Match } from "@/lib/types"
 import { useToast } from "@/hooks/use-toast"
@@ -69,6 +81,7 @@ export default function GameDetailPage() {
   const [addParticipantDialogOpen, setAddParticipantDialogOpen] = useState(false)
   const [joiningMatch, setJoiningMatch] = useState(false)
   const [leavingMatch, setLeavingMatch] = useState(false)
+  const [cancellingMatch, setCancellingMatch] = useState(false)
   const [savingResult, setSavingResult] = useState(false)
   const [addingParticipant, setAddingParticipant] = useState(false)
 
@@ -212,6 +225,28 @@ export default function GameDetailPage() {
       })
     } finally {
       setLeavingMatch(false)
+    }
+  }
+
+  const handleCancelMatch = async () => {
+    if (!user?.id || !game?.id) return
+
+    setCancellingMatch(true)
+    try {
+      await cancelMatch(game.id, user.id)
+      toast({
+        title: "Jogo cancelado",
+        description: "Os participantes foram notificados.",
+      })
+      refresh()
+    } catch (err) {
+      toast({
+        title: "Erro",
+        description: err instanceof Error ? err.message : "Não foi possível cancelar o jogo.",
+        variant: "destructive",
+      })
+    } finally {
+      setCancellingMatch(false)
     }
   }
 
@@ -363,7 +398,9 @@ export default function GameDetailPage() {
                     day: "numeric",
                   })}
                 </p>
-                <p className="text-gray-600">às {game.time}</p>
+                <p className="text-gray-600">
+                  às {game.time} · {game.duration || 60} min
+                </p>
               </div>
             </div>
 
@@ -456,6 +493,45 @@ export default function GameDetailPage() {
                   Precisas de nível {game.minLevel} para participar neste jogo Arranca.
                 </p>
               )}
+            </div>
+          )}
+
+          {/* Cancel button (organizer, before completion) */}
+          {isOrganizer && !game.hasHappened && game.status !== "cancelled" && (
+            <div className="mt-6 pt-6 border-t">
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="w-full text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                    disabled={cancellingMatch}
+                  >
+                    {cancellingMatch ? (
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    ) : (
+                      <X className="w-5 h-5 mr-2" />
+                    )}
+                    Cancelar jogo
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Cancelar este jogo?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Todos os jogadores inscritos vão ser notificados. Esta ação não pode ser revertida.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Voltar</AlertDialogCancel>
+                    <AlertDialogAction
+                      className="bg-red-600 hover:bg-red-700"
+                      onClick={handleCancelMatch}
+                    >
+                      Sim, cancelar jogo
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
           )}
 

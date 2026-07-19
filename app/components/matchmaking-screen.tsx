@@ -111,6 +111,7 @@ export default function MatchMakingScreen() {
     venueName: "",
     date: "",
     time: "",
+    duration: "60",
     totalPlayers: "10",
     level: "Intermédio",
     totalPrice: "150", // Total price for the game
@@ -247,6 +248,7 @@ export default function MatchMakingScreen() {
         venueName: newMatch.venueName || newMatch.location,
         date: newMatch.date,
         time: newMatch.time,
+        duration: parseInt(newMatch.duration) || 60,
         totalPlayers,
         playersNeeded,
         level: newMatch.level,
@@ -286,6 +288,7 @@ export default function MatchMakingScreen() {
         venueName: "",
         date: "",
         time: "",
+        duration: "60",
         totalPlayers: "10",
         level: "Intermédio",
         totalPrice: "150",
@@ -942,7 +945,7 @@ export default function MatchMakingScreen() {
                       onChange={(e) => setNewMatch({ ...newMatch, location: e.target.value })}
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-2">
                       <Label>Data</Label>
                       <Input
@@ -958,6 +961,23 @@ export default function MatchMakingScreen() {
                         value={newMatch.time}
                         onChange={(e) => setNewMatch({ ...newMatch, time: e.target.value })}
                       />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Duração</Label>
+                      <Select
+                        value={newMatch.duration}
+                        onValueChange={(v) => setNewMatch({ ...newMatch, duration: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="30">30 min</SelectItem>
+                          <SelectItem value="60">60 min</SelectItem>
+                          <SelectItem value="90">90 min</SelectItem>
+                          <SelectItem value="120">120 min</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">

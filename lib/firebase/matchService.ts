@@ -7,8 +7,18 @@ import {
 
 import { db } from "./config";
 import { fetchDocument } from "./server";
+import { pushNotification } from "./notificationService";
 import { Match, MatchStats, User } from "@/lib/types";
-import { sendMatchJoinEmail, sendMatchResultEmail } from "@/lib/email/emailService";
+import {
+  sendMatchCancelledEmail,
+  sendMatchJoinEmail,
+  sendMatchResultEmail,
+} from "@/lib/email/emailService";
+
+// Users can switch off "Jogos" emails in their profile; in-app
+// notifications are always delivered.
+const wantsMatchEmails = (u: User | null | undefined) =>
+  u?.preferences?.notifications?.matchInvites !== false;
 
 // Points awarded when a ranked match completes
 export const MVP_BONUS_POINTS = 15;
@@ -87,19 +97,104 @@ export async function joinMatch(matchId: string, user: User): Promise<void> {
   // Notify the organizer outside the transaction — never blocks the join
   if (joined) {
     const { match, spotsLeft } = joined as { match: Match; spotsLeft: number };
-    fetchDocument("users", match.organizerId)
-      .then((organizer) => {
-        const org = organizer as User | null;
-        if (!org?.email || org.id === user.id) return;
-        sendMatchJoinEmail(org.email, org.firstName || match.organizer, user.displayName || user.firstName, {
+    if (match.organizerId !== user.id) {
+      const playerName = user.displayName || user.firstName
+      pushNotification(
+        match.organizerId,
+        "match_invite",
+        "Novo jogador no teu jogo",
+        `${playerName} juntou-se ao teu jogo de ${match.sport} (${match.date} às ${match.time}).`,
+        `/app/game/${match.id}`
+      );
+      fetchDocument("users", match.organizerId)
+        .then((organizer) => {
+          const org = organizer as User | null;
+          if (!org?.email || !wantsMatchEmails(org)) return;
+          sendMatchJoinEmail(org.email, org.firstName || match.organizer, playerName, {
+            sport: match.sport,
+            date: match.date,
+            time: match.time,
+            location: match.venueName || match.location,
+            spotsLeft,
+          });
+        })
+        .catch(() => {});
+    }
+  }
+}
+
+// Cancel a match (organizer only). Registered participants are notified
+// in-app and by email.
+export async function cancelMatch(matchId: string, actorId: string): Promise<void> {
+  const matchRef = doc(db, "matches", matchId);
+  let cancelled: {
+    match: Match;
+    recipients: { id: string; email: string; firstName: string; wantsEmail: boolean }[];
+  } | null = null;
+
+  await runTransaction(db, async (tx) => {
+    cancelled = null;
+    const snap = await tx.get(matchRef);
+    if (!snap.exists()) throw new Error("Este jogo já não existe.");
+    const match = { id: snap.id, ...snap.data() } as Match;
+
+    if (match.organizerId !== actorId) {
+      throw new Error("Apenas o organizador pode cancelar o jogo.");
+    }
+    if (match.hasHappened || match.status === "completed") {
+      throw new Error("Não podes cancelar um jogo já concluído.");
+    }
+    if (match.status === "cancelled") return;
+
+    const { ids } = normalizedRoster(match);
+    const registeredIds = ids.filter((id) => id !== "" && id !== actorId);
+    const userSnaps = await Promise.all(
+      registeredIds.map((id) => tx.get(doc(db, "users", id)))
+    );
+
+    tx.update(matchRef, {
+      status: "cancelled",
+      updatedAt: Timestamp.fromDate(new Date()),
+    });
+
+    cancelled = {
+      match,
+      recipients: userSnaps
+        .filter((s) => s.exists())
+        .map((s) => {
+          const u = s.data() as User;
+          return {
+            id: s.id,
+            email: u.email || "",
+            firstName: u.firstName || "jogador",
+            wantsEmail: wantsMatchEmails(u),
+          };
+        }),
+    };
+  });
+
+  if (cancelled) {
+    const { match, recipients } = cancelled as {
+      match: Match;
+      recipients: { id: string; email: string; firstName: string; wantsEmail: boolean }[];
+    };
+    recipients.forEach((r) => {
+      pushNotification(
+        r.id,
+        "match_update",
+        "Jogo cancelado",
+        `O jogo de ${match.sport} de ${match.date} às ${match.time} foi cancelado pelo organizador.`,
+        `/app/game/${match.id}`
+      );
+      if (r.email && r.wantsEmail) {
+        sendMatchCancelledEmail(r.email, r.firstName, {
           sport: match.sport,
           date: match.date,
           time: match.time,
           location: match.venueName || match.location,
-          spotsLeft,
         });
-      })
-      .catch(() => {});
+      }
+    });
   }
 }
 
@@ -265,8 +360,10 @@ export async function completeMatchWithStats(
   result: MatchResultInput
 ): Promise<void> {
   const matchRef = doc(db, "matches", matchId);
-  let resultEmails: {
+  let resultRecipients: {
+    id: string;
     email: string;
+    wantsEmail: boolean;
     firstName: string;
     sport: string;
     date: string;
@@ -278,7 +375,7 @@ export async function completeMatchWithStats(
   }[] = [];
 
   await runTransaction(db, async (tx) => {
-    resultEmails = []; // reset on transaction retry
+    resultRecipients = []; // reset on transaction retry
     const snap = await tx.get(matchRef);
     if (!snap.exists()) throw new Error("Este jogo já não existe.");
     const match = { id: snap.id, ...snap.data() } as Match;
@@ -351,9 +448,11 @@ export async function completeMatchWithStats(
         updatedAt: Timestamp.fromDate(new Date()),
       });
 
-      if (outcome && userData.email) {
-        resultEmails.push({
-          email: userData.email,
+      if (outcome) {
+        resultRecipients.push({
+          id: uid,
+          email: userData.email || "",
+          wantsEmail: wantsMatchEmails(userData),
           firstName: userData.firstName || "jogador",
           sport: match.sport,
           date: match.date,
@@ -375,7 +474,7 @@ export async function completeMatchWithStats(
           venue: match.venueName || match.venue || "",
           date: match.date,
           time: match.time,
-          duration: "60 min", // matches don't track duration yet; standard slot
+          duration: `${match.duration || 60} min`,
           result: outcome,
           score: resultPayload.score,
           participants: names,
@@ -393,17 +492,30 @@ export async function completeMatchWithStats(
     });
   });
 
-  // Result emails go out only when stats were applied (first completion),
-  // outside the transaction so they never block or retry it
-  resultEmails.forEach((r) =>
-    sendMatchResultEmail(r.email, r.firstName, {
-      sport: r.sport,
-      date: r.date,
-      result: r.outcome,
-      score: r.score,
-      mvp: r.mvp,
-      pointsEarned: r.pointsEarned,
-      isMvp: r.isMvp,
-    })
-  );
+  // Result notifications/emails go out only when stats were applied (first
+  // completion), outside the transaction so they never block or retry it
+  resultRecipients.forEach((r) => {
+    const outcomeLabel =
+      r.outcome === "win" ? "Vitória" : r.outcome === "loss" ? "Derrota" : "Empate";
+    pushNotification(
+      r.id,
+      "match_update",
+      r.isMvp ? "Jogo concluído — foste o MVP! 👑" : `Jogo concluído — ${outcomeLabel}`,
+      `${r.sport} (${r.date})${r.score ? ` · ${r.score}` : ""}${
+        r.pointsEarned ? ` · +${r.pointsEarned} pontos` : ""
+      }`,
+      `/app/game/${matchId}`
+    );
+    if (r.email && r.wantsEmail) {
+      sendMatchResultEmail(r.email, r.firstName, {
+        sport: r.sport,
+        date: r.date,
+        result: r.outcome,
+        score: r.score,
+        mvp: r.mvp,
+        pointsEarned: r.pointsEarned,
+        isMvp: r.isMvp,
+      });
+    }
+  });
 }

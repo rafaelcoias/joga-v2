@@ -34,6 +34,7 @@ import { useToast } from "@/hooks/use-toast"
 import { findSlotConflict } from "@/lib/firebase/bookingService"
 import { fetchDocument } from "@/lib/firebase/server"
 import { sendBookingOrganizerEmail, sendBookingUserEmail } from "@/lib/email/emailService"
+import { pushNotification } from "@/lib/firebase/notificationService"
 import Image from "next/image"
 
 export default function VenuesScreen() {
@@ -275,6 +276,15 @@ export default function VenuesScreen() {
             // Email is a courtesy — never block the booking flow
           })
       }
+
+      // In-app notification for the organizer (fire-and-forget)
+      pushNotification(
+        arena.organizerId,
+        "booking",
+        "Nova reserva",
+        `${userName} reservou ${arena.name} a ${bookingForm.date} às ${bookingForm.time}.`,
+        "/app?screen=arenas"
+      )
 
       toast({
         title: "Reserva enviada!",

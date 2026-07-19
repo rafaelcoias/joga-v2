@@ -22,6 +22,7 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { useAuth } from "@/lib/contexts/AuthContext"
+import NotificationBell from "./notification-bell"
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -155,6 +156,11 @@ export default function DashboardLayout({
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
+        {/* Desktop top bar */}
+        <div className="hidden lg:flex items-center justify-end bg-white border-b border-gray-200 px-6 py-1.5">
+          <NotificationBell onNavigate={onNavigate} />
+        </div>
+
         {/* Mobile Header */}
         <div className="lg:hidden bg-white border-b border-gray-200 p-4">
           <div className="flex items-center justify-between">
@@ -164,16 +170,19 @@ export default function DashboardLayout({
               </div>
               <h1 className="text-lg font-bold text-green-600">JOGA!</h1>
             </div>
-            <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-              <SheetTrigger asChild>
-                <Button variant="ghost" size="icon">
-                  <Menu className="w-6 h-6" />
-                </Button>
-              </SheetTrigger>
-              <SheetContent side="left" className="p-0 w-80">
-                <Sidebar mobile />
-              </SheetContent>
-            </Sheet>
+            <div className="flex items-center gap-1">
+              <NotificationBell onNavigate={onNavigate} />
+              <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+                <SheetTrigger asChild>
+                  <Button variant="ghost" size="icon">
+                    <Menu className="w-6 h-6" />
+                  </Button>
+                </SheetTrigger>
+                <SheetContent side="left" className="p-0 w-80">
+                  <Sidebar mobile />
+                </SheetContent>
+              </Sheet>
+            </div>
           </div>
         </div>
 

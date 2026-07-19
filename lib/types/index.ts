@@ -65,6 +65,7 @@ export interface Match {
   date: string;
   playersNeeded: number;
   totalPlayers: number;
+  duration?: number; // Match duration in minutes (default 60)
   level: string;
   organizer: string;
   organizerId: string;
@@ -242,10 +243,19 @@ export interface Message {
 }
 
 // Notification Types
+export type NotificationType =
+  | "match_invite"
+  | "match_update"
+  | "message"
+  | "game_reminder"
+  | "friend_request"
+  | "booking"
+  | "system";
+
 export interface Notification {
   id: string;
   userId: string;
-  type: "match_invite" | "message" | "game_reminder" | "friend_request" | "system";
+  type: NotificationType;
   title: string;
   content: string;
   read: boolean;
